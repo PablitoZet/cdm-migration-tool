@@ -1,0 +1,1853 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CDM Migration Tool</title>
+  <link rel="stylesheet" href="/static/tailwind.css">
+  <script src="/static/vendor/lucide.min.js"></script>
+  <style>
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    .field { width: 100%; margin-top: .35rem; background: #020617; border: 1px solid #334155; border-radius: .5rem; padding: .55rem .7rem; color: #e2e8f0; font-size: .75rem; }
+    .field:focus { outline: none; border-color: #0ea5e9; }
+    .btn-secondary { padding: .5rem .75rem; border-radius: .5rem; background: #1e293b; border: 1px solid #475569; color: #cbd5e1; font-size: .75rem; font-weight: 600; }
+    .btn-secondary:hover { background: #334155; }
+    .workflow-action:disabled { opacity: .38; cursor: not-allowed; filter: grayscale(.35); box-shadow: none; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col antialiased selection:bg-sky-500 selection:text-white">
+
+  <!-- TOP HEADER (Clean, Minimal) -->
+  <header class="bg-slate-900 border-b border-slate-800/80 px-6 py-3 flex items-center justify-between sticky top-0 z-40 shadow-sm">
+    <div class="flex items-center space-x-3">
+      <div class="w-8 h-8 rounded-lg bg-sky-600 flex items-center justify-center shadow-md shadow-sky-900/30">
+        <i data-lucide="layers" class="w-4 h-4 text-white"></i>
+      </div>
+      <h1 class="font-bold text-base text-slate-100 tracking-tight">CDM Migration Tool</h1>
+    </div>
+
+    <!-- PROFILE SELECTOR & SYSTEM STATUS -->
+    <div class="flex items-center space-x-3">
+      <!-- Modern Custom Profile Popover -->
+      <div class="relative" id="profile-dropdown-container">
+        <button id="profile-dropdown-btn" onclick="toggleProfileDropdown(event)"
+                title="Select Active Migration Profile"
+                class="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-semibold text-slate-100 transition-all shadow-sm">
+          <span id="profile-dot" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span id="profile-label">DEV Sandbox</span>
+          <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-400 transition-transform duration-200" id="profile-chevron"></i>
+        </button>
+
+        <!-- Floating Popover Card -->
+        <div id="profile-dropdown-menu" class="hidden absolute right-0 mt-2 w-72 bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl p-1.5 z-50 space-y-1 backdrop-blur-md">
+          <div id="profile-options"><div class="p-3 text-xs text-slate-500">Loading profiles…</div></div>
+          <details class="border-t border-slate-800 pt-1">
+            <summary class="p-2 rounded-lg hover:bg-slate-800 text-[11px] text-slate-500 cursor-pointer">Advanced profile management</summary>
+            <button onclick="openProfileModal(true)" class="w-full text-left p-2 rounded-lg hover:bg-slate-800 text-xs font-semibold text-sky-300">
+              + Create another migration profile
+            </button>
+          </details>
+        </div>
+      </div>
+
+      <div class="h-4 w-px bg-slate-800"></div>
+
+      <button onclick="openProfileModal(false)" title="Configure the migration source and destination"
+              class="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700/80 text-xs font-semibold flex items-center space-x-1.5">
+        <i data-lucide="settings" class="w-3.5 h-3.5 text-sky-400"></i><span>Migration Setup</span>
+      </button>
+
+      <button onclick="openRecoveryModal()" title="Migration run history"
+              class="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700/80 text-xs font-semibold flex items-center space-x-1.5">
+        <i data-lucide="history" class="w-3.5 h-3.5 text-indigo-400"></i><span>Run history</span>
+      </button>
+
+      <div class="h-4 w-px bg-slate-800"></div>
+
+      <!-- Clean Status Badges -->
+      <div class="flex items-center space-x-2 text-xs">
+        <span id="badge-db" class="px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-800 shadow-sm">
+          <i data-lucide="database" class="w-3.5 h-3.5"></i>
+          <span id="txt-db">Database: Connecting...</span>
+        </span>
+        <span id="badge-cloud" class="px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-800 shadow-sm">
+          <i data-lucide="cloud" class="w-3.5 h-3.5"></i>
+          <span id="txt-cloud">Cloud API: Ready</span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN VIEWPORT -->
+  <main class="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
+
+    <!-- SECTION 1: KPI METRICS & EXECUTION CONTROLS -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
+
+      <!-- Minimalist Scope Context Header -->
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs border-b border-slate-800/80 pb-3">
+        <div class="flex items-center space-x-2">
+          <span class="text-slate-500 font-medium">Active Workspace:</span>
+          <span class="font-bold text-slate-100" id="scope-workspace-title">Selected source scope</span>
+          <span class="text-slate-700">&bull;</span>
+          <span class="font-mono text-sky-400 font-medium" id="scope-node-badge">NodeID: 1124604</span>
+        </div>
+        <div class="flex items-center space-x-3 text-[11px] text-slate-400">
+          <span>Target: <strong class="text-slate-200" id="scope-target-cloud">Cloud DEV</strong></span>
+        </div>
+      </div>
+
+      <!-- Top Metrics Row -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+
+        <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Total Scope</div>
+          <div class="text-xl font-bold text-slate-100 mt-0.5" id="kpi-total">0</div>
+          <div class="text-[10px] text-slate-500 mt-0.5"><span id="kpi-folders">0</span> fld / <span id="kpi-docs">0</span> doc</div>
+        </div>
+
+        <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Migrated</div>
+          <div class="text-xl font-bold text-emerald-400 mt-0.5" id="kpi-success">0</div>
+          <div class="text-[10px] text-emerald-400 font-mono mt-0.5" id="kpi-pct-txt">0.0%</div>
+        </div>
+
+        <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Pending</div>
+          <div class="text-xl font-bold text-amber-400 mt-0.5" id="kpi-pending">0</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">Failed: <strong id="kpi-failed" class="text-rose-400">0</strong></div>
+        </div>
+
+        <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Binary Volume</div>
+          <div class="text-xl font-bold text-indigo-300 mt-0.5" id="kpi-bytes">0.0 MB</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">Azure Storage</div>
+        </div>
+
+        <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Throughput</div>
+          <div class="text-xl font-bold text-sky-400 font-mono mt-0.5" id="kpi-mb-speed">0.0 MB/s</div>
+          <div class="text-[10px] text-slate-400 font-mono mt-0.5" id="kpi-files-speed">0.0 files/s</div>
+        </div>
+
+        <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3 flex flex-col justify-between">
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Engine State</div>
+          <div class="flex items-center space-x-2 mt-0.5">
+            <span id="engine-dot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+            <span class="text-base font-bold text-slate-400" id="engine-state">IDLE</span>
+          </div>
+          <div id="engine-threads" class="text-[10px] text-slate-500 font-mono">Worker pool idle</div>
+        </div>
+
+      </div>
+
+      <!-- Progress Bar -->
+      <div>
+        <div class="flex justify-between items-center text-xs font-semibold mb-1.5">
+          <span class="text-slate-300 flex items-center space-x-2">
+            <span>Migration Progress</span>
+            <span id="txt-dry-run-badge" class="hidden px-2 py-0.5 rounded text-[10px] font-semibold font-mono tracking-wider"></span>
+          </span>
+          <span class="text-sky-400 font-mono text-sm font-bold" id="progress-percent">0.0%</span>
+        </div>
+        <div class="w-full bg-slate-950 rounded-full h-3 border border-slate-800 overflow-hidden relative">
+          <div id="progress-bar-fill" class="bg-gradient-to-r from-sky-500 via-indigo-500 to-emerald-500 h-full rounded-full transition-all duration-300 w-0"></div>
+        </div>
+      </div>
+
+      <!-- Action & Control Buttons with Clear Tooltips -->
+      <div class="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-800/80">
+        <div class="flex flex-wrap items-center gap-2.5">
+
+          <!-- 1. Scan Source -->
+          <button id="btn-scan-source" onclick="triggerExtract()"
+                  title="Step 1: Reads the source workspace in read-only mode and builds the local migration inventory."
+                  class="workflow-action px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-2 transition-all shadow-sm">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-sky-400"></i>
+            <span>1. Scan Source Workspace</span>
+          </button>
+
+          <!-- 2. Dry-Run Simulation -->
+          <button id="btn-dry-run" onclick="startMigration('dry_run')" disabled
+                  title="Step 2: Validates the full manifest without writing to Cloud. It does not estimate unmeasured production throughput."
+                  class="workflow-action px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-sm">
+            <i data-lucide="scan" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>2. Dry-Run Simulation</span>
+          </button>
+
+          <!-- 3. Test PoC 100 -->
+          <button id="btn-pilot" onclick="startMigration('poc_100')" disabled
+                  title="Step 3: Uploads a deterministic risk-stratified pilot covering large, deep, multi-version, categorized and reference cases."
+                  class="workflow-action px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 transition-all shadow-sm shadow-indigo-900/30">
+            <i data-lucide="flask-conical" class="w-3.5 h-3.5"></i>
+            <span>3. Representative Pilot</span>
+          </button>
+
+          <!-- 4. Full Migration -->
+          <button id="btn-full-cutover" onclick="startMigration('full')" disabled
+                  title="Step 4: Executes the full configured pipeline only after parity and production source-freeze gates pass."
+                  class="workflow-action px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 transition-all shadow-sm shadow-emerald-900/30">
+            <i data-lucide="play" class="w-3.5 h-3.5"></i>
+            <span>4. Start Full Cutover</span>
+          </button>
+        </div>
+
+        <!-- Dynamic Control Buttons (Pause/Resume & Stop) -->
+        <div class="flex items-center space-x-2">
+
+          <!-- Dynamic Pause / Resume Button -->
+          <button id="btn-pause-toggle" onclick="togglePause()"
+                  title="Pause or resume active migration stream"
+                  disabled
+                  class="px-3.5 py-2 bg-slate-800 text-slate-500 border border-slate-800 rounded-lg text-xs font-medium flex items-center space-x-1.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+            <i id="icon-pause-toggle" data-lucide="pause" class="w-3.5 h-3.5"></i>
+            <span id="txt-pause-toggle">Pause</span>
+          </button>
+
+          <!-- Stop Button -->
+          <button id="btn-stop" onclick="stopMigration()"
+                  title="Cancel active execution gracefully after current batch"
+                  disabled
+                  class="px-3 py-2 bg-slate-800 text-slate-500 border border-slate-800 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+            <i data-lucide="square" class="w-3.5 h-3.5"></i>
+            <span>Stop</span>
+          </button>
+
+        </div>
+      </div>
+
+      <div id="workflow-next-action" class="rounded-lg border border-sky-900/60 bg-sky-950/25 px-3 py-2 text-xs text-sky-200">
+        <strong>Next action:</strong> Scan the source workspace.
+      </div>
+
+      <div class="pt-1">
+        <div class="bg-slate-950/70 border border-slate-800 rounded-lg p-3 flex items-center justify-between gap-3">
+          <div>
+            <div class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Migration readiness</div>
+            <div id="parity-summary" class="text-xs text-slate-500 mt-1">Not evaluated</div>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="openDuplicateProtectionModal()" class="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded text-xs">Duplicate protection</button>
+            <button onclick="openAcceptanceModal()" class="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded text-xs">Acceptance</button>
+            <button onclick="showParityDetails()" class="px-3 py-1.5 bg-sky-950 text-sky-300 border border-sky-800 rounded text-xs">Details</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- SECTION 2: LIVE LOG CONSOLE & LEGACY LINK SIMULATOR (Prominent Operational View) -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Real-Time Log Console (2/3 Width) -->
+      <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col h-[420px] shadow-sm">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
+          <div class="flex items-center space-x-2">
+            <i data-lucide="terminal" class="w-4 h-4 text-sky-400"></i>
+            <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider">Live Migration Log Console</h2>
+          </div>
+          <span class="text-[11px] text-slate-500 font-mono">Auto-Scroll Stream</span>
+        </div>
+        <div id="log-terminal" class="flex-1 bg-slate-950 rounded-lg p-3.5 font-mono text-xs overflow-y-auto space-y-1 border border-slate-900/80 shadow-inner">
+          <div class="text-slate-500">[System] CDM Migration Tool engine initialized. Ready.</div>
+        </div>
+      </div>
+
+      <!-- Legacy Link Proxy Simulator (1/3 Width) -->
+      <div id="card-link-resolver" class="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col justify-between shadow-sm space-y-4 transition-all duration-300">
+        <div>
+          <div class="flex items-center space-x-2 pb-3 border-b border-slate-800 mb-3">
+            <i data-lucide="link-2" class="w-4 h-4 text-emerald-400"></i>
+            <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider">Legacy Link Resolver</h2>
+          </div>
+          <p class="text-xs text-slate-400 mb-3 leading-relaxed">
+            Test how legacy OpenText URLs redirect to new Cloud SmartView destinations via the WebReport proxy pattern.
+          </p>
+          <div class="space-y-2">
+            <label class="text-[11px] font-semibold text-slate-400">Legacy NodeID / DataID:</label>
+            <div class="flex space-x-2">
+              <input type="number" id="input-legacy-id" value="18433" class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-sky-500 font-mono">
+              <button onclick="testLinkResolution()" class="px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1 shadow-sm">
+                <i data-lucide="search" class="w-3 h-3"></i>
+                <span>Resolve</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Result Box -->
+        <div id="link-result-box" class="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-2 font-mono">
+          <div class="text-slate-500 text-[11px]">Click 'Resolve' to test WebReport redirect.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- SECTION 3: INTERACTIVE OBJECT INVENTORY & AUDIT TABLE (Full Width Bottom) -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
+
+      <!-- Table Header & Controls Bar -->
+      <!-- Table Header Bar: Title on Left, Exports on Right -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+        <div>
+          <div class="flex items-center space-x-2">
+            <i data-lucide="table-properties" class="w-4 h-4 text-sky-400"></i>
+            <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider">Object Inventory & Reconciliation Audit</h2>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">Filterable database of extracted objects, hierarchy paths, and mapped Cloud NodeIDs.</p>
+        </div>
+
+        <!-- Export & Verification Buttons Group -->
+        <div class="flex items-center space-x-2 self-start sm:self-auto">
+          <button id="btn-verification" onclick="runAutomatedVerification()" disabled
+                  title="Available after a completed Pilot or Full Cutover run."
+                  class="workflow-action px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-sm shadow-indigo-900/40">
+            <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
+            <span>Run Verification (UAT)</span>
+          </button>
+          <button onclick="downloadFile('/api/export/xlsx', 'migration_audit.xlsx')"
+             title="Downloads a native formatted Microsoft Excel (.xlsx) file with color-coded status cells and auto-filters."
+             class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-sm">
+            <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5"></i>
+            <span>Export Excel (.xlsx)</span>
+          </button>
+          <button onclick="downloadFile('/api/export/csv', 'migration_audit.csv')"
+             title="Downloads a standard CSV audit file formatted for European regional Excel (semicolon separator)."
+             class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all">
+            <i data-lucide="download" class="w-3.5 h-3.5 text-sky-400"></i>
+            <span>CSV</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Filter & Search Toolbar Bar -->
+      <div class="flex flex-wrap items-center justify-between gap-2.5 pt-0.5">
+        <div class="flex flex-wrap items-center gap-2.5 flex-1 min-w-[280px]">
+          <!-- Search Input -->
+          <div class="relative flex-1 min-w-[200px] max-w-md">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input type="text" id="table-search" oninput="onSearchInput()" placeholder="Search Name, Path, NodeID..." class="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-sky-500">
+          </div>
+
+          <!-- Type Filter -->
+          <select id="table-filter-category" onchange="onFilterChange()" class="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-sky-500">
+            <option value="">All Types</option>
+            <option value="folder">📁 Folders</option>
+            <option value="document">📄 Documents</option>
+            <option value="other">🔗 Shortcuts & Other</option>
+          </select>
+
+          <!-- Status Filter -->
+          <select id="table-filter-status" onchange="onFilterChange()" class="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-sky-500">
+            <option value="ALL">All Statuses</option>
+            <option value="SUCCESS">✅ Success</option>
+            <option value="PENDING">⏳ Pending</option>
+            <option value="FAILED">❌ Failed</option>
+          </select>
+        </div>
+
+        <div id="table-filter-summary-badge" class="text-[11px] text-slate-500 font-mono hidden sm:block">
+          Live Search Active
+        </div>
+      </div>
+
+      <!-- Data Table -->
+      <div class="overflow-x-auto rounded-lg border border-slate-800/80">
+        <table class="w-full text-left text-xs">
+          <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-[11px] border-b border-slate-800">
+            <tr>
+              <th class="py-2.5 px-3">Source NodeID</th>
+              <th class="py-2.5 px-3">Object Name & Hierarchy Path</th>
+              <th class="py-2.5 px-3">Type</th>
+              <th class="py-2.5 px-3">Target Cloud ID</th>
+              <th class="py-2.5 px-3 text-center">Status</th>
+              <th class="py-2.5 px-3 text-center">Integrity (SHA-256)</th>
+              <th class="py-2.5 px-3 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody id="nodes-table-body" class="divide-y divide-slate-800/60 bg-slate-900/60">
+            <tr>
+              <td colspan="7" class="py-8 text-center text-slate-500">Loading migration inventory...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Table Pagination Bar -->
+      <div class="flex items-center justify-between text-xs text-slate-400 pt-1">
+        <div id="table-pagination-info">Showing 0 of 0 items</div>
+        <div class="flex items-center space-x-2">
+          <button id="btn-page-prev" onclick="changePage(-1)" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">Previous</button>
+          <span id="txt-page-num" class="font-mono text-slate-300">Page 1 of 1</span>
+          <button id="btn-page-next" onclick="changePage(1)" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+  <!-- EXTRACT RESET CONFIRMATION MODAL -->
+  <div id="modal-extract-confirm" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-amber-900/60 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 relative">
+      <div class="flex items-center space-x-3 text-amber-400">
+        <div class="p-2.5 rounded-xl bg-amber-950/60 border border-amber-800/60">
+          <i data-lucide="alert-triangle" class="w-6 h-6"></i>
+        </div>
+        <div>
+          <h3 class="font-bold text-slate-100 text-base">Re-Scan Workspace Manifest?</h3>
+          <p class="text-xs text-amber-400/90 font-medium">State Reset Safety Guard</p>
+        </div>
+      </div>
+
+      <p class="text-xs text-slate-300 leading-relaxed" id="txt-extract-confirm-msg">
+        The active manifest already contains migrated or verified records. Re-scanning will reset the local manifest for this profile and rediscover the hierarchy from the source database.
+      </p>
+
+      <div class="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 space-y-1">
+        <div>Target Scope: <strong class="text-slate-200" id="confirm-workspace-title">-</strong></div>
+        <div>Source NodeID: <strong class="text-sky-300 font-mono" id="confirm-workspace-nodeid">-</strong></div>
+      </div>
+
+      <div class="flex justify-end space-x-3 pt-2 border-t border-slate-800/80">
+        <button onclick="closeExtractConfirmModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold">Cancel</button>
+        <button onclick="confirmExtract()" class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-amber-950/50 flex items-center space-x-1.5">
+          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+          <span>Yes, Reset & Re-Scan</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AUTOMATED VERIFICATION MODAL -->
+  <div id="modal-verification" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-indigo-900/60 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 relative">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center space-x-3 text-indigo-400">
+          <div class="p-2.5 rounded-xl bg-indigo-950/60 border border-indigo-800/60">
+            <i data-lucide="shield-check" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-slate-100 text-base">Post-Migration Verification</h3>
+            <p class="text-xs text-indigo-400/90 font-medium">Automated reconciliation and acceptance checks</p>
+          </div>
+        </div>
+        <div id="verify-overall-badge" class="px-3 py-1 rounded-md text-xs font-bold font-mono">
+          RUNNING...
+        </div>
+      </div>
+
+      <div id="verify-results-container" class="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+        <div class="py-8 text-center text-slate-500">Executing verification test suites...</div>
+      </div>
+
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800 text-xs text-slate-400">
+        <span id="verify-execution-time">Execution time: -</span>
+        <button onclick="closeVerificationModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PRODUCTION CUTOVER SAFETY MODAL -->
+  <div id="modal-prod" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-rose-900/60 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 relative">
+      <div class="flex items-center space-x-3 text-rose-400">
+        <div class="p-2.5 rounded-xl bg-rose-950/60 border border-rose-800/60">
+          <i data-lucide="alert-triangle" class="w-6 h-6"></i>
+        </div>
+        <div>
+          <h3 class="font-bold text-slate-100 text-base">Switch to LIVE PRODUCTION Profile?</h3>
+          <p id="prod-profile-summary" class="text-xs text-rose-400/90 font-medium">Selected production profile</p>
+        </div>
+      </div>
+
+      <p class="text-xs text-slate-300 leading-relaxed">
+        You are switching the operator console to the production destination. Confirm that the selected profile and target NodeID are correct.
+      </p>
+
+      <div class="flex justify-end space-x-3 pt-2">
+        <button onclick="closeProdModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold">Cancel</button>
+        <button onclick="confirmProdSwitch()" class="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-rose-950/50">Use production profile</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FULL CUTOVER CONFIRMATION -->
+  <div id="modal-full-cutover" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-rose-900/60 rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-5">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div><h3 class="font-bold text-slate-100">Start production cutover</h3><p class="text-xs text-rose-300">Final confirmation before writing the complete migration scope to GX39.</p></div>
+        <button onclick="closeModal('modal-full-cutover')" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+        <div class="rounded-lg bg-slate-950 border border-slate-800 p-3"><span class="block text-[10px] text-slate-500">Profile</span><strong id="cutover-profile" class="text-slate-200"></strong></div>
+        <div class="rounded-lg bg-slate-950 border border-slate-800 p-3"><span class="block text-[10px] text-slate-500">Source DataID</span><strong id="cutover-source" class="text-slate-200 mono"></strong></div>
+        <div class="rounded-lg bg-slate-950 border border-slate-800 p-3"><span class="block text-[10px] text-slate-500">Destination parent NodeID</span><strong id="cutover-target" class="text-slate-200 mono"></strong></div>
+      </div>
+      <label class="flex items-start gap-3 rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-xs">
+        <input id="cutover-readonly" type="checkbox" class="mt-0.5" onchange="updateCutoverConfirmation()">
+        <span><strong class="text-slate-100">I confirm that the on-premise source is now read-only.</strong><span class="block text-[11px] text-slate-400 mt-1">The app will re-read the source signature and reject the cutover if it differs from the scanned inventory.</span></span>
+      </label>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <label>Operator<input id="cutover-operator" class="field" oninput="updateCutoverConfirmation()" placeholder="Name recorded in the migration log"></label>
+        <label>Change ticket / note (optional)<input id="cutover-note" class="field" placeholder="Example: CHG-12345"></label>
+      </div>
+      <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
+        <button onclick="closeModal('modal-full-cutover')" class="btn-secondary">Cancel</button>
+        <button id="btn-confirm-full-cutover" onclick="confirmFullCutover()" disabled class="px-5 py-2 bg-rose-600 hover:bg-rose-500 rounded text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Verify source and start</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PROFILE CONFIGURATION -->
+  <div id="modal-profile" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-sky-900/60 rounded-2xl max-w-4xl w-full p-6 shadow-2xl space-y-5 max-h-[94vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div><h3 class="font-bold text-slate-100">Migration Setup</h3>
+          <p class="text-xs text-slate-400">Source, Cloud and credentials in one place. Everything is saved locally for the next launch.</p></div>
+        <button onclick="closeModal('modal-profile')" class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+        <label class="md:col-span-3">Migration name<input id="pf-name" class="field" placeholder="Workspace migration"></label>
+        <label id="pf-id-wrap">Internal profile ID<input id="pf-id" class="field" placeholder="rnd_workspace"></label>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <section class="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+          <div><h4 class="text-sm font-semibold text-slate-100">1. Source Content Server</h4><p class="text-[11px] text-slate-500">Read-only PostgreSQL connection and the selected source scope.</p></div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <label class="col-span-2">PostgreSQL host<input id="pf-db-host" class="field"></label>
+            <label>Database<input id="pf-db-name" class="field" placeholder="cs"></label>
+            <label>User<input id="pf-db-user" class="field"></label>
+            <label class="col-span-2">Password<input id="pf-db-password" type="password" class="field" autocomplete="new-password"></label>
+            <label class="col-span-2">Source root DataID<input id="pf-source-root" type="number" class="field">
+              <span class="block text-[10px] text-slate-500 mt-1">DataID of the folder or workspace to migrate. The complete subtree below this object is included.</span>
+            </label>
+          </div>
+        </section>
+        <section class="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+          <div><h4 class="text-sm font-semibold text-slate-100">2. OpenText Cloud</h4><p class="text-[11px] text-slate-500">GX39 endpoint, service account and destination root.</p></div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <label class="col-span-2">Cloud URL<input id="pf-ot-url" class="field" placeholder="https://.../cs/cs"></label>
+            <label>User<input id="pf-ot-user" class="field"></label>
+            <label>Password<input id="pf-ot-password" type="password" class="field" autocomplete="new-password"></label>
+            <label class="col-span-2">Destination parent NodeID<input id="pf-target-root" type="number" class="field">
+              <span class="block text-[10px] text-slate-500 mt-1">NodeID of an existing GX39 folder or workspace that accepts child objects. The app creates the selected source root inside it.</span>
+            </label>
+          </div>
+        </section>
+      </div>
+
+      <section class="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div><h4 class="text-sm font-semibold text-slate-100">3. Source document files</h4>
+          <p class="text-[11px] text-slate-500">Paste one container-level SAS URL. The app derives the storage account, container, token and blob locator automatically.</p></div>
+        <label class="block text-xs">Azure Container SAS URL
+          <input id="pf-azure-sas-url" type="password" class="field" autocomplete="new-password" placeholder="https://account.blob.core.windows.net/container?sv=...">
+        </label>
+        <p class="text-[11px] text-amber-300/80">Use a SAS for the complete content container. A URL generated for one individual blob cannot migrate the full workspace.</p>
+      </section>
+
+      <details class="bg-slate-950 border border-slate-800 rounded-xl p-4">
+        <summary class="text-xs font-semibold text-slate-300 cursor-pointer">Mappings for exceptions — normally leave empty</summary>
+        <p class="text-[11px] text-slate-500 mt-2">Do not configure these in advance. After the source scan, Migration Readiness will name any missing source-to-GX39 ID mapping.</p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3 text-xs">
+          <label>Category definitions and attributes
+            <span class="block text-[10px] text-slate-500 mt-1">Source DefID/AttrID → GX39 category and attribute key.</span>
+            <textarea id="pf-category-map" rows="4" class="field mono">{}</textarea>
+          </label>
+          <label>Business Workspace types and templates
+            <span class="block text-[10px] text-slate-500 mt-1">Required only for Business Workspaces that must be created in Cloud.</span>
+            <textarea id="pf-workspace-map" rows="4" class="field mono">{}</textarea>
+          </label>
+          <label>Owners
+            <span class="block text-[10px] text-slate-500 mt-1">Source user IDs → GX39 user IDs when dates and owners are preserved.</span>
+            <textarea id="pf-owner-map" rows="3" class="field mono">{}</textarea>
+          </label>
+        </div>
+      </details>
+
+      <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-[11px] text-slate-400">
+        <strong class="text-slate-300">Fixed migration policy:</strong> source dates and owners are preserved; migrated content inherits the approved permissions of the selected GX39 destination. Readiness stops the process if an owner mapping or approval is missing.
+      </div>
+
+      <div id="profile-discovery-result" class="hidden bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs mono whitespace-pre-wrap"></div>
+      <div class="flex flex-wrap justify-between gap-2 border-t border-slate-800 pt-3">
+        <div class="flex gap-2">
+          <button onclick="discoverConfiguredSource()" class="btn-secondary">Check source workspace</button>
+          <button onclick="discoverConfiguredTarget()" class="btn-secondary">Check Cloud destination</button>
+          <button onclick="testConnections()" class="btn-secondary">Test connections</button>
+        </div>
+        <button onclick="saveProfile()" class="px-5 py-2 bg-sky-600 hover:bg-sky-500 rounded text-xs font-semibold">Save setup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DUPLICATE PROTECTION -->
+  <div id="modal-duplicate-protection" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-sky-900/60 rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-5">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div><h3 class="font-bold text-slate-100">Duplicate protection</h3><p class="text-xs text-slate-400">One-time GX39 preparation required before the first real upload.</p></div>
+        <button onclick="closeModal('modal-duplicate-protection')" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <p class="text-xs text-slate-300 leading-relaxed">If GX39 creates an object but its HTTP response is lost, the app cannot safely assume that creation failed. Without this field, a retry could create the same object twice.</p>
+      <div class="rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-[11px] text-slate-400">The tool writes a stable technical value such as <span class="mono text-slate-300">CDM:&lt;profile&gt;:&lt;source DataID&gt;</span> to every created object. During a retry it reads this value, finds the existing object and continues instead of creating a duplicate.</div>
+      <label class="block text-xs">OpenText attribute key for “CDM Migration ID”
+        <input id="duplicate-marker-attr" class="field" placeholder="Example: 12345_2">
+        <span class="block text-[10px] text-slate-500 mt-1">Ask the GX39 administrator to create an indexed text attribute named “CDM Migration ID”, applicable to migrated object types, and provide its key in the OpenText format categoryID_attributeID. Configure it once per target tenant.</span>
+      </label>
+      <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
+        <button onclick="closeModal('modal-duplicate-protection')" class="btn-secondary">Cancel</button>
+        <button onclick="saveDuplicateProtection()" class="px-5 py-2 bg-sky-600 hover:bg-sky-500 rounded text-xs font-semibold">Save duplicate protection</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MIGRATION ACCEPTANCE -->
+  <div id="modal-acceptance" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-sky-900/60 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div><h3 class="font-bold text-slate-100">Migration Acceptance</h3>
+          <p class="text-xs text-slate-400">Business and operational decisions are recorded here, separately from connection setup.</p></div>
+        <button onclick="closeModal('modal-acceptance')" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <section class="space-y-3">
+        <div><h4 class="text-xs font-bold text-slate-200">Before Representative Pilot</h4><p class="text-[11px] text-slate-500">Confirm these items after reviewing the scanned scope and the GX39 test destination.</p></div>
+        <label class="flex items-start gap-2 text-xs"><input id="acc-workflows-zero" type="checkbox" class="mt-0.5"><span>No active workflows remain in the migration scope.</span></label>
+        <label class="flex items-start gap-2 text-xs"><input id="acc-target-acl" type="checkbox" class="mt-0.5"><span>The selected destination permissions are approved for the intended users.</span></label>
+        <label class="flex items-start gap-2 text-xs"><input id="acc-scope-ok" type="checkbox" class="mt-0.5"><span>Historical audit events and personal UI preferences are accepted as outside this workspace migration.</span></label>
+      </section>
+      <section class="space-y-3 border-t border-slate-800 pt-4">
+        <div><h4 class="text-xs font-bold text-slate-200">After successful GX39 TEST Pilot</h4><p id="acc-pilot-help" class="text-[11px] text-slate-500">Available after the pilot has completed successfully.</p></div>
+        <label class="flex items-start gap-2 text-xs"><input id="acc-operational-ok" type="checkbox" class="mt-0.5"><span>Workspace roles, search, legacy links, check-out, metadata edit and new-version operations passed the pilot.</span></label>
+      </section>
+      <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
+        <button onclick="closeModal('modal-acceptance')" class="btn-secondary">Cancel</button>
+        <button onclick="saveAcceptance()" class="px-5 py-2 bg-sky-600 hover:bg-sky-500 rounded text-xs font-semibold">Save acceptance</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PARITY DETAILS -->
+  <div id="modal-parity" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-sky-900/60 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-4">
+      <div class="flex justify-between"><div><h3 class="font-bold">Migration Readiness</h3><p class="text-xs text-slate-400">Items marked FAIL must be resolved before the production run.</p></div><button onclick="closeModal('modal-parity')">✕</button></div>
+      <div id="parity-checks" class="space-y-2 max-h-[65vh] overflow-y-auto"></div>
+    </div>
+  </div>
+
+  <!-- RUN HISTORY -->
+  <div id="modal-recovery" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-indigo-900/60 rounded-2xl max-w-4xl w-full p-6 shadow-2xl space-y-4">
+      <div class="flex justify-between"><div><h3 class="font-bold">Run history</h3><p class="text-xs text-slate-400">Previous Dry Runs, Pilots and Full Cutovers for the active profile.</p></div><button onclick="closeModal('modal-recovery')">✕</button></div>
+      <div id="history-resume-summary" class="rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-400"></div>
+      <div id="recovery-runs" class="space-y-2 max-h-[65vh] overflow-y-auto"></div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT LOGIC -->
+  <script>
+    lucide.createIcons();
+
+    async function downloadFile(url, fallbackName) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.detail || `Export failed (${response.status})`);
+        }
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const blobUrl = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = match ? match[1] : fallbackName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(blobUrl);
+      } catch (error) {
+        showToast('Export Failed', error.message, 'error');
+      }
+    }
+
+    let currentEnv = 'dev';
+    let currentEnvClass = 'sandbox';
+    let profileCache = [];
+    let pendingProfile = null;
+    let editingNewProfile = false;
+    let currentPage = 1;
+    let totalPages = 1;
+    let searchDebounce = null;
+    let engineStatus = 'IDLE';
+    let lastEngineStatus = 'IDLE';
+    let latestWorkflow = {};
+    let latestInventory = {};
+    let latestFreeze = {};
+
+    // Toast Notification System
+    function showToast(title, message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+
+      let border = 'border-slate-700 bg-slate-900/95 text-slate-200';
+      let iconName = 'info';
+      let iconColor = 'text-sky-400';
+
+      if (type === 'success') {
+        border = 'border-emerald-800/80 bg-slate-900/95 text-emerald-300';
+        iconName = 'check-circle-2';
+        iconColor = 'text-emerald-400';
+      } else if (type === 'warning') {
+        border = 'border-amber-800/80 bg-slate-900/95 text-amber-300';
+        iconName = 'alert-triangle';
+        iconColor = 'text-amber-400';
+      } else if (type === 'error') {
+        border = 'border-rose-800/80 bg-slate-900/95 text-rose-300';
+        iconName = 'x-circle';
+        iconColor = 'text-rose-400';
+      }
+
+      toast.className = `pointer-events-auto flex items-start space-x-3 p-3.5 rounded-xl border shadow-xl backdrop-blur-md transition-all duration-300 transform translate-y-2 opacity-0 max-w-sm ${border}`;
+      toast.innerHTML = `
+        <i data-lucide="${iconName}" class="w-4 h-4 mt-0.5 shrink-0 ${iconColor}"></i>
+        <div class="flex-1">
+          <div class="font-bold text-xs text-slate-100">${title}</div>
+          <div class="text-[11px] text-slate-400 mt-0.5 leading-relaxed">${message}</div>
+        </div>
+      `;
+
+      container.appendChild(toast);
+      lucide.createIcons();
+
+      setTimeout(() => {
+        toast.classList.remove('translate-y-2', 'opacity-0');
+      }, 20);
+
+      setTimeout(() => {
+        toast.classList.add('opacity-0', '-translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        currentEnv = data.active_environment;
+        currentEnvClass = data.environment_class || 'sandbox';
+        latestWorkflow = data.workflow || {};
+        latestInventory = data.manifest_stats || {};
+        latestFreeze = data.freeze || {};
+        updateEnvUI(currentEnv);
+        updateSafetyGates(data.parity, data.freeze, data.manifest_stats);
+        updateWorkflowControls();
+
+        // Update Scope Context Header
+        if (data.workspace_title) {
+          document.getElementById('scope-workspace-title').textContent = data.workspace_title;
+        }
+        if (data.source_workspace_nodeid) {
+          document.getElementById('scope-node-badge').textContent = `NodeID: ${data.source_workspace_nodeid}`;
+        }
+        // Update DB badge
+        const badgeDb = document.getElementById('badge-db');
+        const txtDb = document.getElementById('txt-db');
+        const envLabel = currentEnvClass === 'production' ? 'PROD' : currentEnvClass.toUpperCase();
+
+        if (data.source_db && data.source_db.status === 'connected') {
+          badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-emerald-950/60 text-emerald-300 flex items-center space-x-1.5 border border-emerald-700/60 shadow-sm shadow-emerald-950/30";
+          txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"></span> <span>PostgreSQL (${envLabel}): <strong>Online</strong></span>`;
+        } else if (data.source_db && data.source_db.status === 'not_checked') {
+          badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-700";
+          txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Database: <strong>Not checked</strong></span>`;
+        } else {
+          badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-rose-950/60 text-rose-300 flex items-center space-x-1.5 border border-rose-700/60 shadow-sm shadow-rose-950/30";
+          txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block"></span> <span>Database: <strong>Offline</strong></span>`;
+        }
+
+        // Update Cloud API badge
+        const badgeCloud = document.getElementById('badge-cloud');
+        const txtCloud = document.getElementById('txt-cloud');
+        const cloudLabel = currentEnvClass === 'production' ? 'PROD' : currentEnvClass.toUpperCase();
+
+        if (data.target_cloud && data.target_cloud.status === 'connected') {
+          badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-emerald-950/60 text-emerald-300 flex items-center space-x-1.5 border border-emerald-700/60 shadow-sm shadow-emerald-950/30";
+          txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"></span> <span>Cloud API (${cloudLabel}): <strong>Online</strong></span>`;
+        } else if (data.target_cloud && (data.target_cloud.status === 'unconfigured' || data.target_cloud.status === 'not_checked')) {
+          badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-500 flex items-center space-x-1.5 border border-slate-800";
+          txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Cloud API: Unconfigured</span>`;
+        } else {
+          badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-rose-950/60 text-rose-300 flex items-center space-x-1.5 border border-rose-700/60 shadow-sm shadow-rose-950/30";
+          txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block"></span> <span>Cloud API: <strong>Offline</strong></span>`;
+        }
+      } catch (e) {
+        console.error("Status fetch error", e);
+      }
+    }
+
+    async function pollTelemetry() {
+      try {
+        const res = await fetch('/api/telemetry');
+        const t = await res.json();
+        engineStatus = t.status;
+        latestFreeze = t.freeze || latestFreeze;
+
+        // Update KPIs
+        document.getElementById('kpi-total').textContent = t.total_nodes.toLocaleString();
+        document.getElementById('kpi-folders').textContent = t.total_folders.toLocaleString();
+        document.getElementById('kpi-docs').textContent = t.total_docs.toLocaleString();
+        document.getElementById('kpi-success').textContent = t.success_nodes.toLocaleString();
+        document.getElementById('kpi-pending').textContent = t.pending_nodes.toLocaleString();
+        document.getElementById('kpi-failed').textContent = t.failed_nodes.toLocaleString();
+
+        document.getElementById('kpi-pct-txt').textContent = `${t.progress_percent}%`;
+        document.getElementById('progress-percent').textContent = `${t.progress_percent}%`;
+        document.getElementById('progress-bar-fill').style.width = `${t.progress_percent}%`;
+
+        // Dynamic Throughput formatting (MB/s vs KB/s vs Idle)
+        const speedMb = Number(t.speed_mb_per_sec || 0);
+        const speedFiles = Number(t.speed_files_per_sec || 0);
+        const filesEl = document.getElementById('kpi-files-speed');
+        const mbEl = document.getElementById('kpi-mb-speed');
+
+        if (t.status === 'RUNNING') {
+          if (speedMb >= 0.1) {
+            mbEl.textContent = `${speedMb.toFixed(1)} MB/s`;
+          } else if (speedMb > 0) {
+            mbEl.textContent = `${(speedMb * 1024).toFixed(1)} KB/s`;
+          } else {
+            mbEl.textContent = `0.0 MB/s`;
+          }
+          filesEl.textContent = `${speedFiles.toFixed(1)} files/s`;
+        } else if (t.status === 'COMPLETED' && speedMb > 0) {
+          mbEl.textContent = speedMb >= 0.1 ? `${speedMb.toFixed(1)} MB/s` : `${(speedMb * 1024).toFixed(1)} KB/s`;
+          filesEl.textContent = `Avg: ${speedFiles.toFixed(1)} files/s`;
+        } else {
+          mbEl.textContent = `0.0 MB/s`;
+          filesEl.textContent = `0 files/s (Idle)`;
+        }
+
+        const mbTransferred = (t.total_bytes / (1024 * 1024)).toFixed(1);
+        document.getElementById('kpi-bytes').textContent = `${mbTransferred} MB`;
+
+        // Update Active Worker Threads dynamically
+        const threadsEl = document.getElementById('engine-threads');
+        const activeWorkers = t.active_workers || 0;
+        const totalThreads = t.configured_threads || 10;
+
+        if (t.status === 'RUNNING') {
+          threadsEl.innerHTML = `<span class="text-emerald-400 font-bold font-mono">${activeWorkers}</span> / ${totalThreads} Active Workers`;
+        } else if (t.status === 'PAUSED') {
+          threadsEl.innerHTML = `<span class="text-amber-400 font-medium">Workers Paused</span>`;
+        } else if (t.status === 'COMPLETED') {
+          threadsEl.innerHTML = `<span class="text-slate-400 font-mono">Pool: ${totalThreads} Workers (Completed)</span>`;
+        } else {
+          threadsEl.innerHTML = `<span class="text-slate-500 font-mono">Pool: ${totalThreads} Workers (Idle)</span>`;
+        }
+
+        // Engine State & Dynamic Pause/Resume Button logic
+        const stateEl = document.getElementById('engine-state');
+        const dotEl = document.getElementById('engine-dot');
+        const btnPause = document.getElementById('btn-pause-toggle');
+        const txtPause = document.getElementById('txt-pause-toggle');
+        const iconPause = document.getElementById('icon-pause-toggle');
+        const btnStop = document.getElementById('btn-stop');
+
+        stateEl.textContent = t.status;
+
+        // Dynamic Execution Mode Badge next to Migration Progress
+        const badgeEl = document.getElementById('txt-dry-run-badge');
+        if (t.execution_mode && t.execution_mode !== 'IDLE') {
+          badgeEl.classList.remove('hidden');
+          badgeEl.textContent = t.execution_mode;
+          if (t.execution_mode === 'DRY-RUN SIMULATION') {
+            badgeEl.className = "px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-semibold font-mono tracking-wider";
+          } else if (t.execution_mode === 'REPRESENTATIVE PILOT') {
+            badgeEl.className = "px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-semibold font-mono tracking-wider";
+          } else {
+            badgeEl.className = "px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-semibold font-mono tracking-wider";
+          }
+        } else {
+          badgeEl.classList.add('hidden');
+        }
+
+        // Auto-refresh table when execution completes or state changes
+        if (lastEngineStatus === 'RUNNING' && t.status !== 'RUNNING') {
+          loadNodesTable();
+        }
+        lastEngineStatus = t.status;
+        updateWorkflowControls();
+
+        if (t.status === 'RUNNING') {
+          dotEl.className = "w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse";
+          stateEl.className = "text-base font-bold text-emerald-400";
+
+          btnPause.disabled = false;
+          btnPause.className = "px-3.5 py-2 bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 border border-amber-800/60 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-sm";
+          txtPause.textContent = "Pause";
+          iconPause.setAttribute("data-lucide", "pause");
+
+          btnStop.disabled = false;
+          btnStop.className = "px-3 py-2 bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all shadow-sm";
+
+        } else if (t.status === 'PAUSED') {
+          dotEl.className = "w-2.5 h-2.5 rounded-full bg-amber-400";
+          stateEl.className = "text-base font-bold text-amber-400";
+
+          btnPause.disabled = false;
+          btnPause.className = "px-3.5 py-2 bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/60 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-sm";
+          txtPause.textContent = "Resume";
+          iconPause.setAttribute("data-lucide", "play");
+
+          btnStop.disabled = false;
+          btnStop.className = "px-3 py-2 bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all shadow-sm";
+
+        } else {
+          // IDLE or COMPLETED
+          dotEl.className = "w-2.5 h-2.5 rounded-full bg-slate-500";
+          stateEl.className = "text-base font-bold text-slate-300";
+          if (t.status === 'COMPLETED') {
+            dotEl.className = "w-2.5 h-2.5 rounded-full bg-emerald-400";
+            stateEl.className = "text-base font-bold text-emerald-400";
+          }
+
+          btnPause.disabled = true;
+          btnPause.className = "px-3.5 py-2 bg-slate-800 text-slate-600 border border-slate-800/80 rounded-lg text-xs font-medium flex items-center space-x-1.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed";
+          txtPause.textContent = "Pause";
+          iconPause.setAttribute("data-lucide", "pause");
+
+          btnStop.disabled = true;
+          btnStop.className = "px-3 py-2 bg-slate-800 text-slate-600 border border-slate-800/80 rounded-lg text-xs font-medium flex items-center space-x-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed";
+        }
+
+        lucide.createIcons();
+
+        // Logs Terminal
+        const term = document.getElementById('log-terminal');
+        term.innerHTML = '';
+        t.logs.forEach(l => {
+          const div = document.createElement('div');
+          let color = 'text-slate-300';
+          if (l.level === 'ERROR') color = 'text-rose-400 font-semibold';
+          if (l.level === 'WARNING') color = 'text-amber-300';
+          div.className = `${color} leading-relaxed`;
+          div.textContent = `[${l.timestamp}] [${l.level}] ${l.message}`;
+          term.appendChild(div);
+        });
+        term.scrollTop = term.scrollHeight;
+
+      } catch (e) {
+        console.error("Telemetry error", e);
+      }
+    }
+
+    async function togglePause() {
+      if (engineStatus === 'RUNNING') {
+        await fetch('/api/migrate/pause', { method: 'POST' });
+      } else if (engineStatus === 'PAUSED') {
+        await fetch('/api/migrate/resume', { method: 'POST' });
+      }
+    }
+
+    async function loadNodesTable() {
+      const search = document.getElementById('table-search').value.trim();
+      const category = document.getElementById('table-filter-category').value;
+      const status = document.getElementById('table-filter-status').value;
+
+      const params = new URLSearchParams({
+        page: currentPage,
+        limit: 15,
+        status: status,
+        category: category,
+        search: search
+      });
+
+      try {
+        const res = await fetch(`/api/nodes?${params.toString()}`);
+        const data = await res.json();
+
+        totalPages = data.total_pages;
+        document.getElementById('txt-page-num').textContent = `Page ${data.page} of ${data.total_pages}`;
+        document.getElementById('table-pagination-info').textContent = `Showing ${data.items.length} of ${data.total_count.toLocaleString()} objects`;
+
+        document.getElementById('btn-page-prev').disabled = (data.page <= 1);
+        document.getElementById('btn-page-next').disabled = (data.page >= data.total_pages);
+
+        const tbody = document.getElementById('nodes-table-body');
+        tbody.innerHTML = '';
+
+        if (data.items.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-slate-500">No objects match the selected filters.</td></tr>`;
+          return;
+        }
+
+        data.items.forEach(item => {
+          const tr = document.createElement('tr');
+          tr.className = "hover:bg-slate-800/40 transition-colors";
+
+          let icon = '📄';
+          if (item.subtype === 0) icon = '📁';
+          else if (item.subtype === 848) icon = '🏢';
+          else if (item.subtype === 1) icon = '🔗';
+          else if (item.subtype === 298) icon = '📦';
+
+          let statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">PENDING</span>`;
+          if (item.status === 'SUCCESS') {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">SUCCESS</span>`;
+          } else if (item.status === 'FAILED') {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30" title="${item.error_msg || ''}">FAILED</span>`;
+          }
+
+          let integrityBadge = `<span class="text-slate-600 text-[10px]">-</span>`;
+          if (item.subtype === 144 || item.subtype === 751 || item.subtype === 136 || item.subtype === 154) {
+            if (item.checksum_status === 'MATCH_VERIFIED') {
+              integrityBadge = `<span title="SHA-256 Checksum Round-Trip Validated & Matched (Zero Bit Corruption)" class="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/60 shadow-sm"><i data-lucide="shield-check" class="w-3 h-3 text-emerald-400"></i><span>SHA-256 Verified</span></span>`;
+            } else if (item.checksum_status === 'UPLOADED_PENDING_AUDIT') {
+              integrityBadge = `<span title="File successfully received by Cloud (HTTP 200). Run Verification Audit to perform round-trip SHA-256 validation." class="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-medium text-sky-300 bg-sky-950/50 border border-sky-800/50 shadow-sm"><i data-lucide="package-check" class="w-3 h-3 text-sky-400"></i><span>Uploaded (HTTP 200)</span></span>`;
+            } else if (item.checksum_status === 'SIMULATED_DRYRUN' || item.dry_run) {
+              integrityBadge = `<span title="Dry-run simulation - real upload pending" class="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] text-indigo-300 bg-indigo-950/40 border border-indigo-800/40"><i data-lucide="scan" class="w-2.5 h-2.5"></i><span>Simulated (Dry-Run)</span></span>`;
+            } else if (item.checksum_status === 'HASH_MISMATCH') {
+              integrityBadge = `<span title="SHA-256 Checksum Mismatch Alert!" class="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-bold text-rose-300 bg-rose-950/60 border border-rose-800/60"><i data-lucide="alert-triangle" class="w-3 h-3 text-rose-400"></i><span>Mismatch</span></span>`;
+            } else {
+              integrityBadge = `<span title="Pending migration upload" class="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] text-amber-400 bg-amber-950/40 border border-amber-800/40"><i data-lucide="clock" class="w-2.5 h-2.5"></i><span>Pending Upload</span></span>`;
+            }
+          } else {
+            integrityBadge = `<span class="text-slate-500 text-[10px]" title="Container node - Structural validation">Hierarchy</span>`;
+          }
+
+          tr.innerHTML = `
+            <td class="py-2.5 px-3 font-mono font-bold text-sky-400">${item.source_id}</td>
+            <td class="py-2.5 px-3">
+              <div class="font-medium text-slate-200 flex items-center space-x-1.5">
+                <span>${icon}</span>
+                <span class="truncate max-w-xs" title="${item.name}">${item.name}</span>
+              </div>
+              <div class="text-[10px] text-slate-500 truncate max-w-md" title="${item.path || ''}">${item.path || ''}</div>
+            </td>
+            <td class="py-2.5 px-3 text-slate-400">${item.type_name}</td>
+            <td class="py-2.5 px-3 font-mono text-emerald-400 font-semibold">${item.target_id || '-'}</td>
+            <td class="py-2.5 px-3 text-center">${statusBadge}</td>
+            <td class="py-2.5 px-3 text-center">${integrityBadge}</td>
+            <td class="py-2.5 px-3 text-right">
+              <button onclick="testLinkForId(${item.source_id})" class="px-2 py-1 bg-slate-800 hover:bg-sky-600 hover:text-white text-slate-300 rounded text-[10px] transition-all" title="Test in Link Resolver">
+                Resolve
+              </button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+
+      } catch (e) {
+        console.error("Table load error", e);
+      }
+    }
+
+    function onSearchInput() {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => {
+        currentPage = 1;
+        loadNodesTable();
+      }, 300);
+    }
+
+    function onFilterChange() {
+      currentPage = 1;
+      loadNodesTable();
+    }
+
+    function changePage(delta) {
+      const target = currentPage + delta;
+      if (target >= 1 && target <= totalPages) {
+        currentPage = target;
+        loadNodesTable();
+      }
+    }
+
+    function toggleProfileDropdown(e) {
+      if (e) e.stopPropagation();
+      const menu = document.getElementById('profile-dropdown-menu');
+      const chevron = document.getElementById('profile-chevron');
+      const isHidden = menu.classList.contains('hidden');
+      if (isHidden) {
+        menu.classList.remove('hidden');
+        if (chevron) chevron.classList.add('rotate-180');
+      } else {
+        menu.classList.add('hidden');
+        if (chevron) chevron.classList.remove('rotate-180');
+      }
+    }
+
+    function closeProfileDropdown() {
+      const menu = document.getElementById('profile-dropdown-menu');
+      const chevron = document.getElementById('profile-chevron');
+      if (menu) menu.classList.add('hidden');
+      if (chevron) chevron.classList.remove('rotate-180');
+    }
+
+    function selectProfile(env) {
+      closeProfileDropdown();
+      const profile = profileCache.find(p => p.profile_id === env);
+      if (profile && profile.environment_class === 'production') {
+        pendingProfile = env;
+        openProdModal();
+      } else {
+        setEnvironment(env);
+      }
+    }
+
+    // Close dropdown on outside click
+    document.addEventListener('click', (e) => {
+      const container = document.getElementById('profile-dropdown-container');
+      if (container && !container.contains(e.target)) {
+        closeProfileDropdown();
+      }
+    });
+
+    function updateEnvUI(env) {
+      const label = document.getElementById('profile-label');
+      const dot = document.getElementById('profile-dot');
+      const profile = profileCache.find(p => p.profile_id === env);
+      if (label) label.textContent = (profile && profile.name) || env;
+      const classification = (profile && profile.environment_class) || currentEnvClass;
+      if (dot) dot.className = 'w-2 h-2 rounded-full ' + (
+        classification === 'production' ? 'bg-rose-400' :
+        classification === 'test' ? 'bg-amber-400' : 'bg-emerald-400'
+      );
+    }
+
+    function openProdModal() {
+      const modal = document.getElementById('modal-prod');
+      const profile = profileCache.find(item => item.profile_id === (pendingProfile || currentEnv));
+      document.getElementById('prod-profile-summary').textContent = profile ?
+        `${profile.name || profile.profile_id} (${profile.profile_id}) → ${profile.ot_cloud_url || 'Cloud URL not configured'} · Target NodeID: ${profile.target_workspace_nodeid || 'not configured'}` :
+        'Selected production profile';
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeProdModal() {
+      const modal = document.getElementById('modal-prod');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    function confirmProdSwitch() {
+      closeProdModal();
+      setEnvironment(pendingProfile || currentEnv, 'confirmed');
+      pendingProfile = null;
+    }
+
+    function openExtractConfirmModal(msg, title, nodeId) {
+      const modal = document.getElementById('modal-extract-confirm');
+      document.getElementById('txt-extract-confirm-msg').textContent = msg;
+      document.getElementById('confirm-workspace-title').textContent = title || '-';
+      document.getElementById('confirm-workspace-nodeid').textContent = nodeId || '-';
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeExtractConfirmModal() {
+      const modal = document.getElementById('modal-extract-confirm');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function triggerExtract(force = false) {
+      showToast("SQL Discovery Active", "Scanning source PostgreSQL database...", "info");
+
+      try {
+        const res = await fetch('/api/extract', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ force: force })
+        });
+        const data = await res.json();
+
+        if (data.status === 'confirmation_required') {
+          openExtractConfirmModal(data.message, data.workspace_title, data.target_node);
+          return;
+        }
+
+        if (res.ok && data.status === 'success') {
+          showToast("Discovery Complete", `Scanned ${data.nodes_count.toLocaleString()} nodes for ${data.workspace_title}.`, "success");
+          await fetchStatus();
+          loadNodesTable();
+        } else {
+          showToast("Source Scan Failed", data.detail || "The source workspace could not be read.", "error");
+        }
+      } catch (e) {
+        showToast("Extraction Error", e.message, "error");
+      }
+    }
+
+    function confirmExtract() {
+      closeExtractConfirmModal();
+      triggerExtract(true);
+    }
+
+    async function setEnvironment(env, confirmation = null) {
+      const res = await fetch('/api/environment', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ environment: env, confirmation: confirmation })
+      });
+      if (res.ok) {
+        showToast("Environment Switched", `Active profile is now [${env.toUpperCase()}].`, "success");
+        fetchStatus();
+        loadNodesTable();
+      } else {
+        const err = await res.json();
+        showToast("Switch Rejected", err.detail, "error");
+      }
+    }
+
+    async function startMigration(mode) {
+      const apiMode = mode === 'poc_100' ? 'pilot' : mode;
+      if (apiMode === 'full' && currentEnvClass === 'production') {
+        openFullCutoverModal();
+        return;
+      }
+      let confirmation = null;
+      if (currentEnvClass === 'production') {
+        if (!window.confirm('Start this run against the configured production destination?')) return;
+        confirmation = 'confirmed';
+      }
+      await launchMigration(apiMode, confirmation);
+    }
+
+    async function launchMigration(apiMode, confirmation = null) {
+      const res = await fetch('/api/migrate/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ mode: apiMode, threads: 8, confirmation: confirmation })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        const message = err.detail === 'Manifest is empty' ?
+          'First complete Step 1: Scan Source Workspace.' :
+          (err.detail || 'Migration could not start. Review Migration Readiness for the next required action.');
+        showToast("Run Not Started", message, "error");
+        return;
+      }
+      const started = await res.json();
+      showToast('Run Started', `${started.mode} · ${started.run_id}`, 'success');
+      await fetchStatus();
+      setTimeout(loadNodesTable, 1000);
+    }
+
+    function openFullCutoverModal() {
+      const profile = profileCache.find(item => item.profile_id === currentEnv) || {};
+      document.getElementById('cutover-profile').textContent = profile.name || currentEnv;
+      document.getElementById('cutover-source').textContent = profile.source_workspace_nodeid || '—';
+      document.getElementById('cutover-target').textContent = profile.target_workspace_nodeid || '—';
+      setValue('cutover-readonly', false);
+      setValue('cutover-operator', localStorage.getItem('cdm_cutover_operator') || profile.ot_cloud_user || '');
+      setValue('cutover-note', '');
+      updateCutoverConfirmation();
+      openModal('modal-full-cutover');
+    }
+
+    function updateCutoverConfirmation() {
+      const accepted = document.getElementById('cutover-readonly').checked;
+      const operator = document.getElementById('cutover-operator').value.trim();
+      document.getElementById('btn-confirm-full-cutover').disabled = !(accepted && operator);
+    }
+
+    async function confirmFullCutover() {
+      const operator = document.getElementById('cutover-operator').value.trim();
+      const note = document.getElementById('cutover-note').value.trim();
+      if (!document.getElementById('cutover-readonly').checked || !operator) return;
+      localStorage.setItem('cdm_cutover_operator', operator);
+      const button = document.getElementById('btn-confirm-full-cutover');
+      button.disabled = true;
+      button.textContent = 'Verifying source…';
+      const res = await fetch('/api/freeze/confirm', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({operator: operator, note: note, source_is_read_only: true, confirmation: 'confirmed'})
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        button.textContent = 'Verify source and start';
+        updateCutoverConfirmation();
+        return showToast('Cutover Not Started', data.detail || 'The source no longer matches the scanned inventory.', 'error');
+      }
+      closeModal('modal-full-cutover');
+      button.textContent = 'Verify source and start';
+      latestFreeze = data;
+      await launchMigration('full', 'confirmed');
+    }
+
+    async function stopMigration() {
+      await fetch('/api/migrate/stop', { method: 'POST' });
+    }
+
+    async function testLinkResolution() {
+      const id = document.getElementById('input-legacy-id').value;
+      testLinkForId(id);
+    }
+
+    async function testLinkForId(id) {
+      document.getElementById('input-legacy-id').value = id;
+
+      // Smooth scroll jump to Resolver Card
+      const card = document.getElementById('card-link-resolver');
+      if (card) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.add('ring-2', 'ring-sky-400', 'bg-slate-850');
+        setTimeout(() => card.classList.remove('ring-2', 'ring-sky-400', 'bg-slate-850'), 1200);
+      }
+
+      const box = document.getElementById('link-result-box');
+      let res;
+      let data;
+      try {
+        res = await fetch(`/api/lookup?source_id=${encodeURIComponent(id)}`);
+        data = await res.json();
+      } catch (error) {
+        box.innerHTML = `<div class="text-rose-400 font-bold">Resolver unavailable</div><div class="text-slate-400 text-[11px]">${escapeHtml(error.message)}</div>`;
+        return;
+      }
+      if (!res.ok) {
+        box.innerHTML = `<div class="text-rose-400 font-bold">Resolver unavailable</div><div class="text-slate-400 text-[11px]">${escapeHtml(data.detail || 'The mapping could not be checked.')}</div>`;
+        return;
+      }
+
+      if (data.found) {
+        box.innerHTML = `
+          <div class="text-emerald-400 font-bold flex items-center space-x-1">
+            <span>&#10004; Resolved successfully (HTTP 302)</span>
+          </div>
+          <div class="text-slate-300 text-[11px]"><strong class="text-slate-400">Object:</strong> ${escapeHtml(data.name)}</div>
+          <div class="text-slate-300 text-[11px]"><strong class="text-slate-400">Source ID:</strong> ${escapeHtml(data.source_id)} &rarr; <strong class="text-sky-400">Cloud ID:</strong> ${escapeHtml(data.target_id)}</div>
+          <div class="pt-1 border-t border-slate-800 text-[10px] text-slate-400 break-all">
+            <strong>Target SmartView URL:</strong><br/>
+            <a href="${escapeHtml(data.smartview_url)}" target="_blank" rel="noopener" class="text-sky-400 underline">${escapeHtml(data.smartview_url)}</a>
+          </div>
+        `;
+      } else {
+        box.innerHTML = `
+          <div class="text-amber-400 font-bold">&#9888; Not Mapped Yet</div>
+          <div class="text-slate-400 text-[11px]">${escapeHtml(data.message || 'This object has not been migrated or is not present in the active manifest.')}</div>
+        `;
+      }
+    }
+
+    function openVerificationModal() {
+      const modal = document.getElementById('modal-verification');
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeVerificationModal() {
+      const modal = document.getElementById('modal-verification');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+      loadNodesTable();
+    }
+
+    async function runAutomatedVerification() {
+      openVerificationModal();
+      const container = document.getElementById('verify-results-container');
+      const badge = document.getElementById('verify-overall-badge');
+      const timeEl = document.getElementById('verify-execution-time');
+
+      badge.className = "px-3 py-1 rounded-md text-xs font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse";
+      badge.textContent = "RUNNING AUDIT...";
+      container.innerHTML = `<div class="py-12 text-center text-slate-400 flex flex-col items-center justify-center space-y-2"><div class="w-6 h-6 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div><span>Executing 6 Automated Verification Test Suites...</span></div>`;
+
+      try {
+        const res = await fetch('/api/verify', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({live: true, redownload: false})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `Verification could not start (${res.status}).`);
+        if (!Array.isArray(data.tests)) throw new Error('The verification service returned an invalid response.');
+
+        timeEl.textContent = `Execution time: ${data.execution_time_seconds}s | Passed: ${data.tests_passed}/${data.tests_run}`;
+
+        if (data.overall_status === 'PASS') {
+          badge.className = "px-3 py-1 rounded-md text-xs font-bold font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+          badge.textContent = "OVERALL: PASS ✓";
+        } else {
+          badge.className = "px-3 py-1 rounded-md text-xs font-bold font-mono bg-rose-500/20 text-rose-300 border border-rose-500/30";
+          badge.textContent = "OVERALL: FAIL ✗";
+        }
+
+        container.innerHTML = '';
+        data.tests.forEach((t, idx) => {
+          const card = document.createElement('div');
+          const isPass = t.status === 'PASS';
+          const border = isPass ? 'border-emerald-800/40 bg-emerald-950/10' : 'border-rose-800/40 bg-rose-950/10';
+          const statusPill = isPass
+            ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono">PASS</span>`
+            : `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 font-mono">FAIL</span>`;
+
+          card.className = `p-3.5 rounded-xl border ${border} space-y-1.5`;
+          card.innerHTML = `
+            <div class="flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <span class="text-xs font-mono font-bold text-slate-500">0${idx+1}</span>
+                <span class="font-bold text-xs text-slate-100">${escapeHtml(t.name)}</span>
+              </div>
+              ${statusPill}
+            </div>
+            <div class="text-xs text-slate-300 font-mono bg-slate-950/80 p-2 rounded border border-slate-900">${escapeHtml(t.details)}</div>
+            ${(t.failures || []).length ? `<div class="text-[10px] text-rose-300"><strong>Exceptions:</strong> ${escapeHtml(t.failures.slice(0, 3).join(' · '))}</div>` : ''}
+          `;
+          container.appendChild(card);
+        });
+
+        // Automatically update the table in background so new verified statuses are visible immediately
+        loadNodesTable();
+
+      } catch (e) {
+        badge.className = "px-3 py-1 rounded-md text-xs font-bold font-mono bg-slate-800 text-slate-300 border border-slate-700";
+        badge.textContent = "NOT AVAILABLE";
+        timeEl.textContent = 'Execution not started';
+        container.innerHTML = `<div class="py-8 text-center space-y-2"><div class="text-amber-300 font-semibold">Nothing is ready for verification</div><div class="text-xs text-slate-400">${escapeHtml(e.message)}</div><div class="text-[11px] text-slate-500">Complete a successful Representative Pilot or Full Cutover run, then try again.</div></div>`;
+      }
+    }
+
+    let latestParity = null;
+
+    function closeModal(id) {
+      const modal = document.getElementById(id);
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    function openModal(id) {
+      const modal = document.getElementById(id);
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      lucide.createIcons();
+    }
+
+    async function loadProfiles() {
+      const res = await fetch('/api/profiles');
+      if (!res.ok) return;
+      const data = await res.json();
+      profileCache = data.profiles || [];
+      const container = document.getElementById('profile-options');
+      container.innerHTML = '';
+      profileCache.forEach(profile => {
+        const row = document.createElement('div');
+        row.className = 'flex items-stretch gap-1';
+        const button = document.createElement('button');
+        button.className = 'flex-1 text-left p-2 rounded-lg hover:bg-slate-800 flex items-start gap-2.5';
+        const color = profile.environment_class === 'production' ? 'bg-rose-400' :
+          profile.environment_class === 'test' ? 'bg-amber-400' : 'bg-emerald-400';
+        button.innerHTML = '<span class="w-2 h-2 rounded-full mt-1.5 ' + color + '"></span>' +
+          '<div><div class="text-xs font-semibold text-slate-200">' + escapeHtml(profile.name || profile.profile_id) +
+          (profile.active ? ' <span class="text-sky-400">(active)</span>' : '') +
+          '</div><div class="text-[10px] text-slate-500">' + escapeHtml(profile.profile_id) + ' · ' +
+          escapeHtml(profile.environment_class) + '</div></div>';
+        button.onclick = () => selectProfile(profile.profile_id);
+        row.appendChild(button);
+        container.appendChild(row);
+      });
+      lucide.createIcons();
+      updateEnvUI(currentEnv);
+    }
+
+    async function deleteProfile(profileId) {
+      if (!window.confirm(`Delete inactive profile '${profileId}'? Its state database is retained.`)) return;
+      const res = await fetch('/api/profiles/' + encodeURIComponent(profileId), {method: 'DELETE'});
+      const data = await res.json();
+      if (!res.ok) return showToast('Delete Failed', data.detail, 'error');
+      showToast('Profile Deleted', `Profile '${profileId}' was removed; migration state was retained.`, 'success');
+      loadProfiles();
+    }
+
+    function escapeHtml(value) {
+      const span = document.createElement('span');
+      span.textContent = String(value == null ? '' : value);
+      return span.innerHTML;
+    }
+
+    function setValue(id, value) {
+      const element = document.getElementById(id);
+      if (!element) return;
+      if (element.type === 'checkbox') element.checked = Boolean(value);
+      else element.value = value == null ? '' : value;
+    }
+
+    function openProfileModal(isNew) {
+      closeProfileDropdown();
+      editingNewProfile = Boolean(isNew);
+      const profile = isNew ? {} : (profileCache.find(item => item.profile_id === currentEnv) || {});
+      setValue('pf-id', isNew ? '' : profile.profile_id);
+      document.getElementById('pf-id').disabled = !isNew;
+      document.getElementById('pf-id-wrap').classList.toggle('hidden', !isNew);
+      setValue('pf-name', profile.name || (isNew ? 'Workspace migration' : ''));
+      setValue('pf-source-root', profile.source_workspace_nodeid);
+      setValue('pf-target-root', profile.target_workspace_nodeid);
+      setValue('pf-db-host', profile.db_host);
+      setValue('pf-db-name', profile.db_name || 'cs');
+      setValue('pf-db-user', profile.db_user);
+      setValue('pf-ot-url', profile.ot_cloud_url);
+      setValue('pf-ot-user', profile.ot_cloud_user);
+      setValue('pf-category-map', JSON.stringify(profile.category_mappings || {}, null, 2));
+      setValue('pf-workspace-map', JSON.stringify(profile.workspace_routes || {}, null, 2));
+      setValue('pf-owner-map', JSON.stringify(profile.owner_mappings || {}, null, 2));
+      ['pf-db-password', 'pf-ot-password', 'pf-azure-sas-url'].forEach(id => setValue(id, ''));
+      const credentials = profile.credentials_configured || {};
+      document.getElementById('pf-db-password').placeholder = credentials.db_password ? 'Saved — enter only to change' : 'Enter password';
+      document.getElementById('pf-ot-password').placeholder = credentials.ot_cloud_password ? 'Saved — enter only to change' : 'Enter password';
+      const storageConfigured = credentials.azure_storage_sas_url || credentials.azure_storage_sas_token;
+      document.getElementById('pf-azure-sas-url').placeholder = storageConfigured ?
+        'Storage access saved — paste only to change' : 'https://account.blob.core.windows.net/container?sv=...';
+      document.getElementById('profile-discovery-result').classList.add('hidden');
+      openModal('modal-profile');
+    }
+
+    function openDuplicateProtectionModal() {
+      const profile = profileCache.find(item => item.profile_id === currentEnv) || {};
+      setValue('duplicate-marker-attr', profile.migration_attribute_key);
+      openModal('modal-duplicate-protection');
+    }
+
+    async function saveDuplicateProtection() {
+      const values = {
+        migration_attribute_key: document.getElementById('duplicate-marker-attr').value.trim() || null
+      };
+      const res = await fetch('/api/profiles/' + encodeURIComponent(currentEnv), {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({values: values, make_active: false})
+      });
+      const data = await res.json();
+      if (!res.ok) return showToast('Duplicate Protection Not Saved', data.detail || 'The duplicate-protection setting could not be saved.', 'error');
+      closeModal('modal-duplicate-protection');
+      await loadProfiles();
+      await fetchStatus();
+      showToast('Duplicate Protection Saved', 'Safe retry protection is configured for real uploads.', 'success');
+    }
+
+    function openAcceptanceModal() {
+      const profile = profileCache.find(item => item.profile_id === currentEnv) || {};
+      setValue('acc-target-acl', profile.target_acl_approved);
+      setValue('acc-workflows-zero', profile.active_workflows_confirmed_zero);
+      setValue('acc-scope-ok', Boolean(
+        profile.historical_audit_out_of_scope_approved && profile.personal_state_out_of_scope_approved
+      ));
+      setValue('acc-operational-ok', Boolean(
+        profile.workspace_roles_qualified && profile.lifecycle_operations_qualified &&
+        profile.search_and_facets_qualified && profile.legacy_links_qualified
+      ));
+      const pilotCompleted = (latestWorkflow.successful_modes || []).includes('pilot');
+      document.getElementById('acc-pilot-help').textContent = pilotCompleted ?
+        'A successful Pilot is recorded for this profile. Confirm the observed business behavior.' :
+        'Record this only after the GX39 TEST pilot has passed, including when the pilot was run under the test profile.';
+      openModal('modal-acceptance');
+    }
+
+    async function saveAcceptance() {
+      const operational = document.getElementById('acc-operational-ok').checked;
+      const scopeApproved = document.getElementById('acc-scope-ok').checked;
+      const values = {
+        target_acl_approved: document.getElementById('acc-target-acl').checked,
+        active_workflows_confirmed_zero: document.getElementById('acc-workflows-zero').checked,
+        historical_audit_out_of_scope_approved: scopeApproved,
+        personal_state_out_of_scope_approved: scopeApproved,
+        workspace_roles_qualified: operational,
+        lifecycle_operations_qualified: operational,
+        search_and_facets_qualified: operational,
+        legacy_links_qualified: operational
+      };
+      const res = await fetch('/api/profiles/' + encodeURIComponent(currentEnv), {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({values: values, make_active: false})
+      });
+      const data = await res.json();
+      if (!res.ok) return showToast('Acceptance Not Saved', data.detail || 'The acceptance record could not be saved.', 'error');
+      closeModal('modal-acceptance');
+      await loadProfiles();
+      await fetchStatus();
+      showToast('Acceptance Saved', 'Migration readiness has been recalculated.', 'success');
+    }
+
+    function jsonValue(id) {
+      const value = document.getElementById(id).value.trim() || '{}';
+      return JSON.parse(value);
+    }
+
+    async function saveProfile() {
+      try {
+        const id = document.getElementById('pf-id').value.trim().toLowerCase();
+        const integerOrNull = field => {
+          const value = document.getElementById(field).value;
+          return value ? Number(value) : null;
+        };
+        const values = {
+          name: document.getElementById('pf-name').value.trim(),
+          workspace_title: document.getElementById('pf-name').value.trim(),
+          source_workspace_nodeid: integerOrNull('pf-source-root'),
+          target_workspace_nodeid: integerOrNull('pf-target-root'),
+          db_host: document.getElementById('pf-db-host').value.trim(),
+          db_port: 5432,
+          db_name: document.getElementById('pf-db-name').value.trim() || 'cs',
+          db_user: document.getElementById('pf-db-user').value.trim(),
+          sslmode: 'require',
+          binary_source_adapter: 'azure',
+          ot_cloud_url: document.getElementById('pf-ot-url').value.trim(),
+          ot_cloud_user: document.getElementById('pf-ot-user').value.trim(),
+          verify_ssl: true,
+          category_mappings: jsonValue('pf-category-map'),
+          workspace_routes: jsonValue('pf-workspace-map'),
+          owner_mappings: jsonValue('pf-owner-map')
+        };
+        if (editingNewProfile) values.environment_class = 'test';
+        const secrets = {
+          db_password: document.getElementById('pf-db-password').value,
+          ot_cloud_password: document.getElementById('pf-ot-password').value,
+          azure_storage_sas_url: document.getElementById('pf-azure-sas-url').value
+        };
+        Object.entries(secrets).forEach(([key, value]) => { if (value) values[key] = value; });
+        const res = await fetch('/api/profiles/' + encodeURIComponent(id), {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({values: values, make_active: editingNewProfile})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Profile save failed');
+        currentEnv = data.active ? id : currentEnv;
+        await loadProfiles();
+        await fetchStatus();
+        showToast('Setup Saved', 'Connections, mappings and supplied credentials were saved locally.', 'success');
+        editingNewProfile = false;
+      } catch (error) {
+        showToast('Profile Error', error.message, 'error');
+      }
+    }
+
+    function showDiscoveryResult(value) {
+      const box = document.getElementById('profile-discovery-result');
+      box.textContent = JSON.stringify(value, null, 2);
+      box.classList.remove('hidden');
+    }
+
+    async function discoverConfiguredSource() {
+      const nodeId = Number(document.getElementById('pf-source-root').value);
+      const res = await fetch('/api/discovery/source', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({node_id: nodeId})
+      });
+      showDiscoveryResult(await res.json());
+    }
+
+    async function discoverConfiguredTarget() {
+      const nodeId = Number(document.getElementById('pf-target-root').value);
+      const res = await fetch('/api/discovery/target', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({node_id: nodeId})
+      });
+      showDiscoveryResult(await res.json());
+    }
+
+    async function testConnections() {
+      const res = await fetch('/api/status?deep=true');
+      showDiscoveryResult(await res.json());
+    }
+
+    function setWorkflowAction(id, enabled, enabledTitle, blockedReason) {
+      const button = document.getElementById(id);
+      if (!button) return;
+      button.disabled = !enabled;
+      button.title = enabled ? enabledTitle : blockedReason;
+    }
+
+    function updateWorkflowControls() {
+      const activeStates = ['CREATED', 'RUNNING', 'PAUSED', 'STOPPING'];
+      const active = activeStates.includes(engineStatus) ||
+        (engineStatus === 'IDLE' && Boolean(latestWorkflow.active_run));
+      const manifestReady = Boolean(latestWorkflow.manifest_ready || Number(latestInventory.total_nodes || 0) > 0);
+      const readinessReady = Boolean(latestParity && latestParity.status === 'PASS');
+      const markerReady = Boolean(latestWorkflow.marker_ready);
+      const pilotReady = Boolean(latestWorkflow.pilot_ready);
+      const fullReady = Boolean(latestWorkflow.full_ready);
+      const nonFreezeFullBlockers = (latestWorkflow.full_blockers || []).filter(
+        blocker => blocker !== 'SOURCE_READ_ONLY_FREEZE'
+      );
+      const verificationReady = Boolean(latestWorkflow.verification_available) && !active;
+      const successfulModes = latestWorkflow.successful_modes || [];
+
+      setWorkflowAction(
+        'btn-scan-source', !active,
+        'Read the source workspace and rebuild the local migration inventory.',
+        'Wait until the active migration run has stopped.'
+      );
+      setWorkflowAction(
+        'btn-dry-run', manifestReady && !active,
+        'Validate the complete inventory without writing to Cloud.',
+        active ? 'Wait until the active run has stopped.' : 'First complete Step 1: Scan Source Workspace.'
+      );
+      setWorkflowAction(
+        'btn-pilot', manifestReady && markerReady && pilotReady && !active,
+        'Upload a representative sample to the active Cloud target.',
+        active ? 'Wait until the active run has stopped.' :
+          !manifestReady ? 'First complete Step 1: Scan Source Workspace.' :
+          !markerReady ? 'Open Duplicate protection and enter the OpenText attribute key.' :
+          'Resolve the Pilot prerequisites shown in Migration Readiness and Acceptance.'
+      );
+
+      let fullBlock = '';
+      if (active) fullBlock = 'Wait until the active run has stopped.';
+      else if (!manifestReady) fullBlock = 'First complete Step 1: Scan Source Workspace.';
+      else if (!readinessReady) fullBlock = 'Resolve all items in Migration Readiness before Full Cutover.';
+      else if (!fullReady && nonFreezeFullBlockers.length) fullBlock = 'Resolve the remaining Full Cutover prerequisites shown in Migration Readiness.';
+      setWorkflowAction(
+        'btn-full-cutover', !fullBlock,
+        'Start the complete migration after all readiness gates have passed.',
+        fullBlock
+      );
+      setWorkflowAction(
+        'btn-verification', verificationReady,
+        'Verify the latest completed Pilot or Full Cutover run.',
+        active ? 'Wait until the active run has completed.' : 'Complete a successful Pilot or Full Cutover run first.'
+      );
+
+      const next = document.getElementById('workflow-next-action');
+      if (!next) return;
+      let message = '';
+      if (active) message = 'A migration run is active. Monitor progress or use Pause / Stop if required.';
+      else if (!manifestReady) message = 'Scan the source workspace to build the migration inventory.';
+      else if (!successfulModes.includes('dry_run')) message = 'Run the Dry-Run Simulation to validate the complete inventory without Cloud writes.';
+      else if (!markerReady) message = 'Configure Duplicate protection before the first real upload.';
+      else if (!pilotReady) message = 'Review Migration Readiness and record the required pre-Pilot decisions under Acceptance.';
+      else if (!successfulModes.includes('pilot')) message = 'Run the Representative Pilot against the approved test destination.';
+      else if (!readinessReady) message = 'Open Migration Readiness and resolve the remaining production blockers.';
+      else if (!fullReady && nonFreezeFullBlockers.length) message = 'Review Migration Readiness; one or more Full Cutover prerequisites still require attention.';
+      else message = currentEnvClass === 'production' ?
+        'Full Cutover is ready. Source read-only confirmation will be requested when you start it.' :
+        'All required gates have passed. Full Cutover is available.';
+      next.innerHTML = `<strong>Next action:</strong> ${escapeHtml(message)}`;
+    }
+
+    function updateSafetyGates(parity, freeze, inventory) {
+      latestParity = parity;
+      const parityElement = document.getElementById('parity-summary');
+      if (!inventory || !inventory.total_nodes) {
+        parityElement.className = 'text-xs text-slate-500 mt-1';
+        parityElement.textContent = 'Not checked · scan the source workspace first';
+      } else if (parity && parity.status === 'PASS') {
+        parityElement.className = 'text-xs text-emerald-400 mt-1';
+        parityElement.textContent = 'READY · all migration quality checks passed';
+      } else {
+        parityElement.className = 'text-xs text-rose-400 mt-1';
+        parityElement.textContent = ((parity && parity.failure_count) || 0) + ' items require attention';
+      }
+      updateWorkflowControls();
+    }
+
+    async function showParityDetails() {
+      const res = await fetch('/api/compatibility');
+      latestParity = await res.json();
+      const container = document.getElementById('parity-checks');
+      container.innerHTML = '';
+      const labels = {
+        SUPPORTED_OBJECT_TYPES: 'Supported content types',
+        CATEGORY_SCHEMA_MAPPING: 'Category and attribute mappings',
+        CATEGORY_ROW_FIDELITY: 'Multi-row category values',
+        REFERENCE_FIDELITY: 'Shortcuts and URL objects',
+        REFERENCE_SCOPE: 'Shortcut targets included in scope',
+        ACTIVE_RESERVATIONS: 'Checked-out and reserved documents',
+        VERSION_COMMENT_PARITY: 'Version comments',
+        PERMISSION_PARITY: 'Permissions and access',
+        SYSTEM_ATTRIBUTE_PARITY: 'Dates and owners',
+        WORKSPACE_TYPE_PARITY: 'Business Workspace types',
+        WORKSPACE_ROLE_PARITY: 'Business Workspace roles',
+        LIFECYCLE_PARITY: 'Document operations',
+        SEARCH_PARITY: 'Search and facets',
+        ACTIVE_WORKFLOW_SCOPE: 'Active workflows',
+        LEGACY_LINK_CONTINUITY: 'Existing links and bookmarks',
+        HISTORICAL_AUDIT_SCOPE: 'Historical audit scope',
+        PERSONAL_STATE_SCOPE: 'Personal UI preferences'
+      };
+      (latestParity.checks || []).forEach(check => {
+        const row = document.createElement('div');
+        const pass = check.status === 'PASS';
+        const deferred = check.status === 'DEFERRED';
+        const notChecked = check.status === 'NOT_CHECKED';
+        row.className = 'p-3 rounded-lg border ' + (pass ? 'border-emerald-900 bg-emerald-950/20' :
+          deferred ? 'border-amber-900 bg-amber-950/20' :
+          notChecked ? 'border-slate-700 bg-slate-950/40' : 'border-rose-900 bg-rose-950/20');
+        row.innerHTML = '<div class="flex justify-between text-xs font-bold"><span>' + escapeHtml(labels[check.id] || check.id) +
+          '</span><span class="' + (pass ? 'text-emerald-400' : deferred ? 'text-amber-400' : notChecked ? 'text-slate-400' : 'text-rose-400') + '">' + check.status +
+          '</span></div><div class="text-[11px] text-slate-400 mt-1">' + escapeHtml(check.detail) + '</div>';
+        container.appendChild(row);
+      });
+      openModal('modal-parity');
+    }
+
+    async function openRecoveryModal() {
+      const res = await fetch('/api/history');
+      const data = await res.json();
+      const container = document.getElementById('recovery-runs');
+      const resumeSummary = document.getElementById('history-resume-summary');
+      container.innerHTML = '';
+      const recoverableStatuses = ['COMPLETED_WITH_ERRORS', 'FAILED', 'STOPPED'];
+      const statusLabels = {
+        CREATED: 'Waiting to start', RUNNING: 'Running', PAUSED: 'Paused', STOPPING: 'Stopping',
+        COMPLETED: 'Completed', COMPLETED_WITH_ERRORS: 'Completed with errors', FAILED: 'Failed', STOPPED: 'Stopped'
+      };
+      const modeLabels = {dry_run: 'Dry Run', pilot: 'Representative Pilot', full: 'Full Cutover', verify_only: 'Verification'};
+      let recoverableCount = 0;
+      (data.runs || []).forEach(run => {
+        const recoverable = recoverableStatuses.includes(run.status);
+        if (recoverable) recoverableCount += 1;
+        const card = document.createElement('div');
+        card.className = 'p-3 bg-slate-950 border border-slate-800 rounded-lg flex items-center justify-between gap-3';
+        card.innerHTML = '<div><div class="text-xs font-bold">' + escapeHtml(modeLabels[run.mode] || run.mode) + ' · ' +
+          escapeHtml(statusLabels[run.status] || run.status) + '</div><div class="text-[10px] mono text-slate-500">' +
+          escapeHtml(run.run_id) + ' · ' + escapeHtml(run.created_at) + '</div><div class="text-[11px] text-slate-400">' +
+          run.completed_nodes + ' of ' + run.total_nodes + ' items processed (' + run.progress_percent + '%)' +
+          (run.failed_nodes ? ' · ' + run.failed_nodes + ' failed' : '') + '</div></div>';
+        if (recoverable) {
+          const button = document.createElement('button');
+          button.className = 'btn-secondary';
+          button.textContent = 'Resume interrupted run';
+          button.onclick = () => recoverRun(run.run_id);
+          card.appendChild(button);
+        }
+        container.appendChild(card);
+      });
+      if (!(data.runs || []).length) container.textContent = 'No migration runs for this profile.';
+      resumeSummary.className = 'rounded-lg border p-3 text-xs ' + (recoverableCount ?
+        'border-amber-900/60 bg-amber-950/20 text-amber-200' :
+        'border-slate-800 bg-slate-950/70 text-slate-400');
+      resumeSummary.textContent = recoverableCount ?
+        recoverableCount + ' interrupted run' + (recoverableCount === 1 ? ' can' : 's can') +
+          ' be resumed. Already completed items will not be migrated again.' :
+        'No interrupted run requires action.';
+      openModal('modal-recovery');
+    }
+
+    async function recoverRun(runId) {
+      let confirmation = null;
+      if (currentEnvClass === 'production') {
+        if (!window.confirm('Resume this production run from its saved checkpoints? Already completed items will be skipped.')) return;
+        confirmation = 'confirmed';
+      }
+      const res = await fetch('/api/migrate/recover', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({run_id: runId, threads: 8, confirmation: confirmation})
+      });
+      const data = await res.json();
+      if (!res.ok) return showToast('Resume Rejected', data.detail, 'error');
+      closeModal('modal-recovery');
+      showToast('Run Resumed', 'Continuing from saved checkpoints. Completed items will be skipped.', 'success');
+    }
+
+    loadProfiles();
+    fetchStatus();
+    loadNodesTable();
+    setInterval(pollTelemetry, 1000);
+    setInterval(fetchStatus, 5000);
+  </script>
+</body>
+</html>

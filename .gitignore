@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+config.json
+migration_state*.db*
+*.instance.lock
+*.log
+.env
+.DS_Store
+.idea/
+.vscode/
