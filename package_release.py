@@ -44,6 +44,9 @@ def validate_release_inputs(files: list[Path]) -> None:
         for key in ("db_password", "ot_cloud_password", "azure_storage_sas_url", "azure_storage_sas_token"):
             if profile.get(key):
                 raise RuntimeError(f"config.example.json contains a value for {profile_id}.{key}")
+        for key in ("db_host", "ot_cloud_url", "source_workspace_nodeid", "target_workspace_nodeid"):
+            if profile.get(key):
+                raise RuntimeError(f"config.example.json contains an environment identifier for {profile_id}.{key}")
     forbidden = {"config.json", ".env"}
     for path in files:
         if path.name in forbidden or path.name.startswith("migration_state"):

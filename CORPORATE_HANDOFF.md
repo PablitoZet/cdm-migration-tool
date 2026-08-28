@@ -23,7 +23,8 @@ repository.
 
 - Application version: `2.3.0`.
 - Canonical branch: `main`.
-- Private upstream at handoff: `private-upstream/repository`.
+- The canonical upstream is private; obtain its URL through the approved
+  operator channel rather than storing account identifiers in documentation.
 - GitHub quality workflow passes on Python 3.11.
 - Local clean-install validation passes with 31 unit/contract tests, Ruff and
   mypy.
@@ -85,7 +86,7 @@ Use only:
 - a profile classified as `test`, never `production`;
 - a dedicated test migration namespace and duplicate-protection attribute.
 
-Do **not** use customer production content in GX39 DEV/TEST. Production data may
+Do **not** use production customer content in GX39 DEV/TEST. Production data may
 be used in a lower environment only after explicit data-owner, information
 security/privacy and contractual approval and only when the environment has
 approved equivalent controls. Treat file names, paths, versions, authors,
@@ -220,7 +221,8 @@ relied on operationally.
 
 Update UI and runbooks so that a GX39 TEST Pilot explicitly requires synthetic,
 non-sensitive or formally approved test data. Existing wording must never be
-interpreted as authorization to copy customer PROD into GX39 DEV/TEST.
+interpreted as authorization to copy production customer data into GX39
+DEV/TEST.
 
 ### P2 — sanitized qualification blueprint
 
@@ -286,7 +288,7 @@ production canary is the agreed risk-reduction strategy.
 
 ## 9. Rules for an AI agent continuing on the corporate machine
 
-- Communicate with the operator in Polish unless asked otherwise; keep code and
+- Communicate with the operator in their preferred language; keep code and
   canonical UI terminology in English.
 - Ask for or inspect real evidence before changing a tenant contract.
 - Treat corporate logs, manifests and screenshots as potentially sensitive.

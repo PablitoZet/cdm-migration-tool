@@ -37,6 +37,10 @@ class RepositoryContractTests(unittest.TestCase):
                 "azure_storage_sas_token",
             ):
                 self.assertFalse(profile.get(key), key)
+            self.assertFalse(profile.get("db_host"), "db_host")
+            self.assertFalse(profile.get("ot_cloud_url"), "ot_cloud_url")
+            self.assertIsNone(profile.get("source_workspace_nodeid"), "source_workspace_nodeid")
+            self.assertIsNone(profile.get("target_workspace_nodeid"), "target_workspace_nodeid")
 
     def test_project_version_matches_runtime_version(self):
         import tomllib

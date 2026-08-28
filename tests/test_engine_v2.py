@@ -418,12 +418,12 @@ class ConfigTests(unittest.TestCase):
     def test_container_sas_url_derives_all_azure_runtime_fields(self):
         values = normalize_profile_values("prod", {
             "azure_storage_sas_url": (
-                "https://storage.example.invalid/content?sv=2025-01-05&sp=rl&sig=secret"
+                "https://storage.example.invalid/content?sv=placeholder&sp=rl&sig=placeholder"
             ),
             "migration_attribute_key": "45678_2",
         })
         self.assertEqual(values["azure_storage_account_url"], "https://storage.example.invalid")
-        self.assertEqual(values["azure_storage_sas_token"], "sv=2025-01-05&sp=rl&sig=secret")
+        self.assertEqual(values["azure_storage_sas_token"], "sv=placeholder&sp=rl&sig=placeholder")
         self.assertEqual(values["azure_blob_locator_template"], "azure://content/{provider_data}")
         self.assertEqual(values["migration_category_id"], 45678)
         self.assertEqual(values["migration_namespace"], "cdm-prod")
@@ -442,7 +442,7 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "container-level"):
             normalize_profile_values("prod", {
                 "azure_storage_sas_url": (
-                    "https://storage.example.invalid/content/one-file.bin?sv=x&sig=y"
+                    "https://storage.example.invalid/content/one-file.bin?sv=x&sig=placeholder"
                 ),
             })
 
@@ -451,15 +451,15 @@ class ConfigTests(unittest.TestCase):
             path = Path(tmp) / "config.json"
             path.write_text(
                 '{"default_environment":"prod","environments":{"prod":'
-                '{"db_password":"saved-locally","ot_cloud_password":"cloud-secret",'
-                '"azure_storage_sas_token":"sas-secret",'
+                '{"db_password":"fixture-db-value","ot_cloud_password":"fixture-cloud-value",'
+                '"azure_storage_sas_token":"fixture-sas-value",'
                 '"verify_ssl":true}},"migration_settings":{}}', encoding="utf-8"
             )
             config = load_config(path)
-            self.assertEqual(config.environment().get("db_password"), "saved-locally")
+            self.assertEqual(config.environment().get("db_password"), "fixture-db-value")
             save_config(config, path)
             persisted = path.read_text(encoding="utf-8")
-            self.assertIn("saved-locally", persisted)
+            self.assertIn("fixture-db-value", persisted)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_arbitrary_production_profile_uses_the_same_local_secret_model(self):
@@ -467,10 +467,10 @@ class ConfigTests(unittest.TestCase):
             path = Path(tmp) / "config.json"
             path.write_text(
                 '{"default_environment":"example_prod","environments":{"example_prod":'
-                '{"environment_class":"production","db_password":"saved-locally",'
+                '{"environment_class":"production","db_password":"fixture-db-value",'
                 '"verify_ssl":true}},"migration_settings":{}}', encoding="utf-8",
             )
-            self.assertEqual(load_config(path).environment().get("db_password"), "saved-locally")
+            self.assertEqual(load_config(path).environment().get("db_password"), "fixture-db-value")
 
     def test_secret_environment_variable_names_are_editable_but_values_are_masked(self):
         with tempfile.TemporaryDirectory() as tmp:

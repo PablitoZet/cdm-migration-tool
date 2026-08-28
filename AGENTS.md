@@ -12,8 +12,8 @@ OpenText Content Server folder or Business Workspace from an on-premise database
 and Azure Blob Storage into OpenText Extended ECM Cloud SaaS (GX39).
 
 It is not a commercial migration product and must not become a generic workflow
-platform. The primary production objective is the approved production workspace
-cutover, but operators may use test profiles to migrate other supported source
+platform. The primary objective is one approved production workspace cutover,
+but operators may use test profiles to migrate other supported source
 folders/workspaces from the same Content Server database.
 
 Production reference scale:
@@ -22,11 +22,13 @@ Production reference scale:
 - approximately 151 GB of binary content;
 - 543 files larger than 50 MB;
 - largest known file approximately 7.44 GB;
-- source root for the primary production scope: DataID `PRODUCTION_SOURCE_DATAID`;
+- the production source root DataID is configured only at runtime and must not
+  be stored in the repository;
 - target platform: OpenText GX39 SaaS.
 
-The application is operated by the operator and the second operator. The UI must be simple enough
-that they do not need to study an engineering manual before each run.
+The application is operated by two designated internal operators. The UI must
+be simple enough that they do not need to study an engineering manual before
+each run.
 
 ## 2. Environment boundary
 
@@ -96,8 +98,7 @@ Do not weaken these invariants to make a test pass or unblock a demo.
 Keep ordinary Migration Setup small and understandable.
 
 - **Source root DataID** is the DataID of a supported folder or workspace. The
-  complete subtree is scanned. It is not restricted to production, but a document is
-  not a valid migration root.
+  complete subtree is scanned. A document is not a valid migration root.
 - **Destination parent NodeID** is an existing GX39 folder/workspace that accepts
   child objects. The selected source root is created inside this destination.
 - `source_root_maps_to_target` is fixed to `false` for this tool.

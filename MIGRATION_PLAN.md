@@ -2,9 +2,9 @@
 
 Status: implementation handoff baseline, 2026-08-26.
 
-This plan governs the primary approved production workspace migration. All inventory
-figures and tenant behavior must be reconfirmed on the corporate migration
-machine before approval. Operating steps are defined in
+This plan governs the primary approved production workspace migration. All
+inventory figures and tenant behavior must be reconfirmed on the corporate
+migration machine before approval. Operating steps are defined in
 `DEPLOYMENT_AND_QUALIFICATION.md`.
 
 ## 1. Objective
@@ -29,7 +29,7 @@ The migration must preserve:
 
 | Item | Current planning value |
 |---|---:|
-| Source root DataID | `PRODUCTION_SOURCE_DATAID` |
+| Source root DataID | Configured at runtime; not stored in the repository |
 | Total objects | 28,730 |
 | Document files | 22,115 |
 | Folders/containers | 6,341 |
