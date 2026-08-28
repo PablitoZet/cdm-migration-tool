@@ -72,11 +72,18 @@ Tenant ID mappings remain explicit exceptions:
 - source owner ID to GX39 user ID;
 - Business Workspace subtype/type to target workspace type/template.
 
+Every real run performs online target capability checks. If GX39 create forms
+expose system dates or owner as missing/readonly, preservation fails before a
+new run is created; writable `external_*` dates are not silently treated as
+equivalent to system dates. Node-update and document-version-update contracts
+must both be explicitly qualified; create-form writability alone cannot pass
+the gate.
+
 Direct Azure reads require source provider metadata that resolves
 deterministically to a blob locator. Archive Center `acprimary`/`ixos`
 descriptors are treated as opaque handles; those versions stream through the
-read-only source Content Server REST endpoint by DataID and version. Range-based
-multipart recovery remains fail-closed unless the source returns HTTP 206.
+read-only source Content Server REST endpoint by DataID and version. Multipart
+recovery replays the source from byte zero and does not depend on HTTP Range.
 
 ## Inventory and source signature
 
@@ -112,6 +119,9 @@ Claims contain worker ownership and expiration leases. A stopped process can be
 resumed only through explicit Run history recovery. Recovery releases incomplete
 claims but preserves successful terminal states, target mappings and multipart
 checkpoints.
+Retryable failures that exhausted their automatic attempt budget are requeued
+with a fresh budget only during explicit operator recovery; terminal data,
+mapping and contract failures remain terminal.
 
 ## Phase ordering
 

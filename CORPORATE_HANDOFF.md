@@ -56,6 +56,40 @@ repository.
   `AuthorizationFailure`; container identity/network policy also remains to be
   resolved. Actual Azure binary reads and the production source schema remain
   unqualified.
+- The first real GX39 DEV Pilot created and verified all nine folders, then
+  GX39/WAF reset every ordinary document create because Requests emitted both
+  `Content-Length` and `Transfer-Encoding: chunked` for the custom multipart
+  stream. No document marker was found after reconciling all ten ambiguous
+  creates. `MultipartStream.tell()` now gives Requests an exact remaining
+  length, preventing chunked framing; the interrupted Pilot must be resumed,
+  not replaced with a new run.
+- Explicit recovery now requeues only exhausted `RetryableMigrationError` and
+  `AmbiguousRemoteCommit` items with a fresh attempt budget. Verified folders
+  remain untouched and permanent terminal failures are not reopened.
+- A controlled document probe confirmed that `roles.categories` applies the
+  duplicate marker atomically during multipart-form document create. Earlier
+  missing-marker results were caused by parsing the category read-back at the
+  wrong nesting level. The pipeline also persists the known target ID
+  immediately after the first-version response, applies and reads back the
+  marker before later versions, and lists target versions before content GET.
+  GX39 returns HTTP 500 rather than 404 when asked for a nonexistent version.
+- The same probe showed that an arbitrary `external_identity_type` is rejected
+  and `external_identity` alone is not preserved, so external identity is not
+  used for idempotency. The probe remains in GX39 DEV for manual administrator
+  cleanup; its target ID is recorded only in the local session artifact.
+- Recovery now runs the same online target capability checks as a new real run.
+  Replacement runs reconcile every version of a pre-existing mapping before
+  deciding to upload, preventing duplicate version appends.
+- GX39 CE 25.4 returns category values under
+  `results.data.categories.<categoryID_attributeID>`; marker read-back uses an
+  exact recursive key lookup for this tenant response shape.
+- GX39 CE 25.4 standard create/update forms expose system create/modify dates
+  and owner as readonly. Create permits writable `external_create_date` and
+  `external_modify_date`, but these do not satisfy the current system-attribute
+  preservation contract. Online preflight now blocks real runs unless system
+  dates and owner are writable through qualified node-update and
+  document-version-update contracts; create-form writability alone is
+  insufficient.
 
 Use `git log -1 --oneline` to identify the exact checked-out revision. Never
 assume that a release ZIP and the Git checkout are at the same revision.

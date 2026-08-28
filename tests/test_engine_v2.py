@@ -45,6 +45,8 @@ class FakeTarget:
         self.markers = {}
         self.system_attribute_calls = []
         self.permission_policy_calls = []
+        self.first_version_uploads = 0
+        self.next_version_uploads = 0
 
     def create_container(self, node, parent_id, migration_id):
         self.next_id += 1
@@ -57,8 +59,19 @@ class FakeTarget:
     def find_by_migration_id(self, parent_id, migration_id):
         return self.markers.get((parent_id, migration_id))
 
+    def apply_migration_marker(self, target_id, migration_id):
+        node = self.nodes[target_id]
+        self.markers[(node["parent_id"], migration_id)] = target_id
+
     def get_node(self, target_id):
         return self.nodes[target_id]
+
+    def list_versions(self, target_id):
+        return [
+            {"version_number": version_num}
+            for item_target, version_num in self.contents
+            if item_target == target_id
+        ]
 
     def apply_categories(self, target_id, categories):
         return None
@@ -70,6 +83,7 @@ class FakeTarget:
         self.permission_policy_calls.append((target_id, policy))
 
     def upload_first_version(self, node, version, parent_id, stream, migration_id):
+        self.first_version_uploads += 1
         self.next_id += 1
         data = _read_all(stream)
         self.nodes[self.next_id] = {
@@ -80,6 +94,7 @@ class FakeTarget:
         return UploadResult(self.next_id, version.version_num)
 
     def upload_next_version(self, target_id, version, stream):
+        self.next_version_uploads += 1
         self.contents[(target_id, version.version_num)] = _read_all(stream)
         return UploadResult(target_id, version.version_num)
 
@@ -377,8 +392,157 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(checkpoint["next_part"], 7)
             store.close()
 
+    def test_recovery_requeues_only_retryable_terminal_failures(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            closing(ManifestStore(str(Path(tmp) / "state.db"))) as store,
+        ):
+            nodes = [
+                {"source_id": 1, "parent_source_id": 999, "name": "one", "subtype": 0,
+                 "type_name": "Folder", "depth": 0, "path": "one"},
+                {"source_id": 2, "parent_source_id": 999, "name": "two", "subtype": 0,
+                 "type_name": "Folder", "depth": 0, "path": "two"},
+            ]
+            store.import_extracted_data(nodes, [], [])
+            run_id = store.create_run("dev", RunMode.FULL, 9000)
+            store.start_run(run_id)
+            retryable = store.claim_next(run_id, "CONTAINER", "worker")
+            self.assertIsNotNone(retryable)
+            store.record_failure(
+                run_id, retryable["source_id"], "ambiguous",
+                max_attempts=1, retryable=True, error_code="AmbiguousRemoteCommit",
+            )
+            terminal = store.claim_next(run_id, "CONTAINER", "worker")
+            self.assertIsNotNone(terminal)
+            store.record_failure(
+                run_id, terminal["source_id"], "invalid",
+                max_attempts=1, retryable=False, error_code="TerminalMigrationError",
+            )
+            store.finish_run(run_id, RunStatus.COMPLETED_WITH_ERRORS)
+
+            store.recover_run(run_id)
+
+            with store.connection() as conn:
+                states = {
+                    row["source_id"]: (row["state"], row["attempt_count"])
+                    for row in conn.execute(
+                        "SELECT source_id,state,attempt_count FROM run_items WHERE run_id=?",
+                        (run_id,),
+                    )
+                }
+            self.assertEqual(states[retryable["source_id"]], (ItemState.RETRY_WAIT, 0))
+            self.assertEqual(states[terminal["source_id"]], (ItemState.FAILED_TERMINAL, 1))
+
 
 class PipelineTests(unittest.TestCase):
+    def test_recovery_online_preflight_failure_does_not_mutate_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config()
+            config["environments"]["dev"]["ot_cloud_url"] = "https://target.example.invalid/cs/cs"
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=FakeTarget(), binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes = [{
+                    "source_id": 1, "parent_source_id": 999, "name": "root",
+                    "subtype": 0, "type_name": "Folder", "depth": 0, "path": "root",
+                }]
+                pipeline.manifest.import_extracted_data(nodes, [], [])
+                run_id = pipeline.manifest.create_run(
+                    "dev", RunMode.PILOT, 9000,
+                    config_fingerprint=pipeline._config_fingerprint(),
+                )
+                pipeline.manifest.finish_run(run_id, RunStatus.STOPPED)
+                with (
+                    patch(
+                        "engine.preflight.PreflightAuditor.run",
+                        return_value={
+                            "status": "FAIL",
+                            "checks": [{
+                                "id": "TARGET_SYSTEM_ATTRIBUTE_PRESERVATION",
+                                "status": "FAIL",
+                            }],
+                        },
+                    ),
+                    self.assertRaisesRegex(
+                        TerminalMigrationError,
+                        "TARGET_SYSTEM_ATTRIBUTE_PRESERVATION",
+                    ),
+                ):
+                    pipeline.recover_run(run_id, 1)
+                self.assertEqual(
+                    pipeline.manifest.run_status(run_id)["status"],
+                    RunStatus.STOPPED,
+                )
+
+    def test_replacement_run_reconciles_ready_versions_without_duplicate_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "document.txt"
+            content.write_bytes(b"existing target content")
+            target = FakeTarget()
+            with closing(MigrationPipeline(
+                _config(), str(Path(tmp) / "state.db"),
+                target=target, binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                pipeline.manifest.import_extracted_data(nodes, versions, [])
+                first_run = pipeline.start_migration(threads=1, mode="full")
+                self.assertTrue(pipeline.wait(5))
+                self.assertEqual(
+                    pipeline.manifest.run_status(first_run)["status"],
+                    RunStatus.COMPLETED,
+                )
+                with pipeline.manifest.transaction(immediate=True) as conn:
+                    conn.execute("UPDATE id_mapping SET verified=0 WHERE source_id=3")
+                upload_count = target.first_version_uploads
+
+                replacement = pipeline.start_migration(threads=1, mode="full")
+                self.assertTrue(pipeline.wait(5))
+
+                self.assertEqual(
+                    pipeline.manifest.run_status(replacement)["status"],
+                    RunStatus.COMPLETED,
+                )
+                self.assertEqual(target.first_version_uploads, upload_count)
+
+    def test_document_mapping_and_marker_are_durable_before_later_versions(self):
+        class FailingNextVersionTarget(FakeTarget):
+            def upload_first_version(self, node, version, parent_id, stream, migration_id):
+                result = super().upload_first_version(node, version, parent_id, stream, migration_id)
+                self.markers.pop((parent_id, migration_id), None)
+                return result
+
+            def upload_next_version(self, target_id, version, stream):
+                raise TerminalMigrationError("later version unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "v1.txt"
+            second = Path(tmp) / "v2.txt"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            config = _config()
+            target = FailingNextVersionTarget()
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=target, binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes, versions = _inventory(first)
+                versions.append({
+                    **versions[0], "version_num": 2, "blob_locator": str(second),
+                    "data_size": second.stat().st_size,
+                })
+                pipeline.manifest.import_extracted_data(nodes, versions, [])
+                pipeline.start_migration(threads=1, mode="full")
+                self.assertTrue(pipeline.wait(5))
+                mapping = pipeline.manifest.lookup_mapping(3)
+                parent_mapping = pipeline.manifest.lookup_mapping(2)
+                self.assertIsNotNone(mapping)
+                self.assertIsNotNone(parent_mapping)
+                self.assertEqual(
+                    target.find_by_migration_id(parent_mapping["target_id"], "CDM:test:3"),
+                    mapping["target_id"],
+                )
+
     def test_pipeline_close_releases_manifest_when_source_close_fails(self):
         class Source:
             def close(self):
@@ -622,6 +786,63 @@ class VerificationTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_system_attribute_capabilities_reject_external_dates_as_system_fidelity(self):
+        class Response:
+            def json(self):
+                return {
+                    "forms": [{
+                        "schema": {
+                            "properties": {
+                                "external_create_date": {"readonly": False},
+                                "external_modify_date": {"readonly": False},
+                            }
+                        },
+                        "options": {"fields": {}},
+                    }]
+                }
+
+        client = object.__new__(OpenTextCloudClient)
+        client._request = lambda *_args, **_kwargs: Response()
+        capabilities = client.system_attribute_capabilities(999)
+        self.assertFalse(capabilities["preserves_system_dates_and_owner"])
+        self.assertTrue(capabilities["node_create_forms"]["0"]["external_create_date"])
+        self.assertFalse(capabilities["node_create_forms"]["144"]["owner"])
+        self.assertFalse(capabilities["node_update_qualified"])
+        self.assertFalse(capabilities["version_update_qualified"])
+
+    def test_marker_readback_handles_nested_gx39_category_shape(self):
+        class Response:
+            def json(self):
+                return {
+                    "results": {
+                        "data": {
+                            "categories": {"108324_2": "CDM:test:123"}
+                        }
+                    }
+                }
+
+        client = object.__new__(OpenTextCloudClient)
+        client.migration_category_id = 108324
+        client.migration_attribute_key = "108324_2"
+        client._request = lambda *_args, **_kwargs: Response()
+        self.assertTrue(client._migration_id_matches(999, "CDM:test:123"))
+
+    def test_version_listing_unwraps_gx39_nested_version_shape(self):
+        class Response:
+            def json(self):
+                return {
+                    "results": [{
+                        "data": {"versions": {"version_number": 2, "file_size": 10}}
+                    }]
+                }
+
+        client = object.__new__(OpenTextCloudClient)
+        client._request = lambda *_args, **_kwargs: Response()
+        self.assertEqual(
+            client.list_versions(123),
+            [{"version_number": 2, "file_size": 10}],
+        )
+
     def test_source_content_server_streams_the_requested_version(self):
         class Response:
             def __init__(self, status, *, payload=None, content=b""):
@@ -892,10 +1113,18 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(manager.peek(), "ticket-1")
 
     def test_streaming_multipart_body_has_exact_length(self):
+        import requests
+
         data = b"0123456789" * 100
         body = MultipartStream(
             {"body": "{}"}, "file", "sample.bin", "application/octet-stream", io.BytesIO(data), len(data)
         )
+        prepared = requests.Request(
+            "POST", "https://example.invalid/api/v2/nodes", data=body,
+            headers={"Content-Type": body.content_type, "Content-Length": str(len(body))},
+        ).prepare()
+        self.assertEqual(prepared.headers["Content-Length"], str(len(body)))
+        self.assertNotIn("Transfer-Encoding", prepared.headers)
         encoded = _read_all(body)
         self.assertEqual(len(encoded), len(body))
         self.assertIn(data, encoded)
@@ -1015,6 +1244,15 @@ class PreflightTests(unittest.TestCase):
 
             def get_node(self, target_id):
                 return {"id": target_id, "name": "target", "type": 0}
+
+            def system_attribute_capabilities(self, _target_id):
+                return {
+                    "preserves_system_dates_and_owner": False,
+                    "node_types": {},
+                }
+
+            def close(self):
+                pass
 
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "content.bin"

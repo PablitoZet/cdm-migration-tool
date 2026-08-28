@@ -148,6 +148,8 @@ Before the first real upload, select **Duplicate protection**.
 The GX39 administrator must provide an indexed text attribute, preferably named
 `CDM Migration ID`, applicable to all migrated object types. Enter its OpenText
 attribute key in `categoryID_attributeID` format, for example `12345_2`.
+On GX39 CE 25.4, a `Text: Field` length must be less than 255; use length 254,
+one locked row, `Required` and `Show in Search`.
 
 The tool writes `CDM:<namespace>:<source DataID>` and uses it to reconcile a
 create that may have succeeded when its HTTP response was lost. Never bypass
@@ -350,5 +352,11 @@ The following cannot be certified on a private machine:
 - service-account privileges and ACL inheritance;
 - token lifetime, rate limits, WAF behavior and indexing delay;
 - end-to-end throughput and cutover duration.
+
+The first GX39 DEV Pilot showed that standard node create/update forms expose
+`create_date`, `modify_date` and `owner_user_id` as readonly. Create forms allow
+`external_create_date` and `external_modify_date`, but those are not silently
+accepted as system-date fidelity. A supported OpenText import/bulk contract or
+explicitly approved fidelity design is required before another real run.
 
 Treat each unknown as a blocker until corporate TEST evidence exists.

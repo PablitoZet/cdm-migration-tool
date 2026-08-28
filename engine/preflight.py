@@ -214,6 +214,7 @@ class PreflightAuditor:
             "SOURCE_DB_ONLINE", "PASS" if db_status.get("status") == "connected" else "FAIL",
             _safe_detail(db_status),
         ))
+        target = None
         try:
             target = OpenTextCloudClient(self.env, int(self.settings.get("max_retries", 5)))
             target_status = target.test_connection()
@@ -227,6 +228,14 @@ class PreflightAuditor:
                 "TARGET_ROOT", "PASS" if int(props.get("id", -1)) == root_id else "FAIL",
                 f"id={props.get('id')}, name={props.get('name')}, type={props.get('type')}",
             ))
+            if self.env.get("system_attribute_strategy") == "preserve":
+                capabilities = target.system_attribute_capabilities(root_id)
+                supported = bool(capabilities.get("preserves_system_dates_and_owner"))
+                checks.append(Check(
+                    "TARGET_SYSTEM_ATTRIBUTE_PRESERVATION",
+                    "PASS" if supported else "FAIL",
+                    f"capabilities={capabilities}",
+                ))
             with self.manifest.connection() as conn:
                 heavy = conn.execute(
                     "SELECT COUNT(*) FROM manifest_versions WHERE data_size>=?",
@@ -240,6 +249,9 @@ class PreflightAuditor:
                 ))
         except Exception as exc:
             checks.append(Check("TARGET_API", "FAIL", f"{type(exc).__name__}: {exc}"))
+        finally:
+            if target is not None:
+                target.close()
         if sample_blobs:
             source = None
             try:

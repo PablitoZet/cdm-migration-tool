@@ -767,6 +767,15 @@ class ManifestStore:
                 ),
             )
             conn.execute(
+                """UPDATE run_items SET state=?,attempt_count=0,lease_owner=NULL,lease_expires_at=NULL,
+                   next_attempt_at=?,updated_at=?
+                   WHERE run_id=? AND state=? AND last_error_code IN (?,?)""",
+                (
+                    ItemState.RETRY_WAIT, now, now, run_id, ItemState.FAILED_TERMINAL,
+                    "RetryableMigrationError", "AmbiguousRemoteCommit",
+                ),
+            )
+            conn.execute(
                 "UPDATE migration_runs SET status=?,stop_requested=0,completed_at=NULL WHERE run_id=?",
                 (RunStatus.CREATED, run_id),
             )

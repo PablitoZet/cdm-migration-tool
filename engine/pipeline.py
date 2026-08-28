@@ -202,7 +202,7 @@ class MigrationPipeline:
                 )
                 report = PreflightAuditor(
                     preflight_env, self.manifest, self.settings
-                ).run(online=False, for_mode=str(run_mode))
+                ).run(online=run_mode != RunMode.DRY_RUN, for_mode=str(run_mode))
                 if report["status"] == "FAIL":
                     failed = [check["id"] for check in report["checks"] if check["status"] == "FAIL"]
                     raise TerminalMigrationError(f"Offline pre-flight failed: {', '.join(failed)}")
@@ -240,6 +240,9 @@ class MigrationPipeline:
             if self.is_running:
                 raise StateConflict("Another run is already active")
             worker_count = int(threads or self.settings.get("worker_threads", 8))
+            maximum = int(self.settings.get("max_worker_threads", 16))
+            if not 1 <= worker_count <= maximum:
+                raise ValueError(f"threads must be between 1 and {maximum}")
             run = self.manifest.run_status(run_id)
             if run.get("config_fingerprint") and run["config_fingerprint"] != self._config_fingerprint():
                 raise TerminalMigrationError(
@@ -250,6 +253,23 @@ class MigrationPipeline:
                 and not self.manifest.freeze_status()["confirmed"]
             ):
                 raise TerminalMigrationError("Production recovery requires a valid source freeze confirmation")
+            run_mode = RunMode(run["mode"])
+            if run_mode != RunMode.DRY_RUN and self.env_cfg.get("ot_cloud_url"):
+                from .preflight import PreflightAuditor
+
+                preflight_env = (
+                    self.env_cfg
+                    if isinstance(self.env_cfg, EnvironmentConfig)
+                    else EnvironmentConfig(self.env_name, self.env_cfg)
+                )
+                report = PreflightAuditor(
+                    preflight_env, self.manifest, self.settings
+                ).run(online=True, for_mode=str(run_mode))
+                if report["status"] == "FAIL":
+                    failed = [check["id"] for check in report["checks"] if check["status"] == "FAIL"]
+                    raise TerminalMigrationError(
+                        f"Recovery pre-flight failed: {', '.join(failed)}"
+                    )
             self.manifest.recover_run(run_id)
             run = self.manifest.run_status(run_id)
             self._active_run_id = run_id
@@ -442,17 +462,34 @@ class MigrationPipeline:
             return
         parent = self.manifest.resolve_parent(node.parent_source_id, int(self.env_cfg.get("target_workspace_nodeid")))
         migration_id = self._migration_id(node.source_id)
-        target_id = self.target.find_by_migration_id(parent, migration_id)
+        mapping = self.manifest.lookup_mapping(node.source_id)
+        marker_target = self.target.find_by_migration_id(parent, migration_id)
+        if mapping and marker_target and int(mapping["target_id"]) != marker_target:
+            raise TerminalMigrationError("Durable mapping conflicts with the migration marker")
+        target_id = marker_target or (int(mapping["target_id"]) if mapping else None)
+        if mapping and not marker_target:
+            self.target.apply_migration_marker(target_id, migration_id)
+        elif marker_target and not mapping:
+            self.manifest.commit_mapping(
+                run_id, node.source_id, marker_target, parent, migration_id, worker_id=worker_id,
+            )
+        preexisting_target = target_id is not None
         for index, version in enumerate(versions):
             transfer = self.manifest.version_transfer(run_id, node.source_id, version.version_num)
             if transfer["state"] == ItemState.VERIFIED:
                 target_id = target_id or item.get("target_id")
                 continue
             self.binary_source.validate(version)
-            if target_id is not None:
+            if target_id is not None and (
+                preexisting_target or index == 0 or transfer["state"] != ItemState.READY
+            ):
                 reconciled = self._try_reconcile_version(run_id, node, version, target_id)
                 if reconciled:
                     continue
+            creating_document = index == 0 and target_id is None
+            self.manifest.update_version_transfer(
+                run_id, node.source_id, version.version_num, state=ItemState.UPLOADING,
+            )
             if version.size >= self.target.multipart_threshold:
                 with self._large_upload_slots:
                     result, source_hash = self._multipart_upload(
@@ -482,6 +519,11 @@ class MigrationPipeline:
                 state=ItemState.REMOTE_COMMITTED, target_version_num=result.version_number or version.version_num,
                 source_sha256=source_hash, bytes_transferred=version.size,
             )
+            if creating_document:
+                self.manifest.commit_mapping(
+                    run_id, node.source_id, target_id, parent, migration_id, worker_id=worker_id,
+                )
+                self.target.apply_migration_marker(target_id, migration_id)
             with self._metrics_lock:
                 self._bytes += version.size
         if target_id is None:
@@ -643,15 +685,19 @@ class MigrationPipeline:
                 source_digest.update(chunk)
         source_hash = source_digest.hexdigest()
         self._assert_declared_hash(version, source_hash)
+        transfer = self.manifest.version_transfer(run_id, node.source_id, version.version_num)
+        target_version = int(transfer.get("target_version_num") or version.version_num)
+        available_versions = {
+            int(item["version_number"])
+            for item in self.target.list_versions(target_id)
+            if item.get("version_number") is not None
+        }
+        if target_version not in available_versions:
+            return False
         target_digest = hashlib.sha256()
-        try:
-            for chunk in self.target.iter_content(target_id, version.version_num):
-                if chunk:
-                    target_digest.update(chunk)
-        except TerminalMigrationError as exc:
-            if "HTTP 404" in str(exc):
-                return False
-            raise
+        for chunk in self.target.iter_content(target_id, target_version):
+            if chunk:
+                target_digest.update(chunk)
         target_hash = target_digest.hexdigest()
         if target_hash != source_hash:
             raise TerminalMigrationError(
@@ -659,7 +705,7 @@ class MigrationPipeline:
             )
         self.manifest.update_version_transfer(
             run_id, node.source_id, version.version_num,
-            state=ItemState.VERIFIED, target_version_num=version.version_num,
+            state=ItemState.VERIFIED, target_version_num=target_version,
             source_sha256=source_hash, target_sha256=target_hash,
             bytes_transferred=version.size,
         )

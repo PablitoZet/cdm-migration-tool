@@ -134,6 +134,9 @@ class MultipartStream(io.RawIOBase):
     def __len__(self) -> int:
         return self.length
 
+    def tell(self) -> int:
+        return self._prefix_pos + self._file_read + self._suffix_pos
+
     def readable(self) -> bool:
         return True
 
@@ -369,8 +372,85 @@ class OpenTextCloudClient:
             payload = payload.get("data", payload.get("versions", []))
         result = []
         for item in payload if isinstance(payload, list) else []:
-            result.append(item.get("data", item) if isinstance(item, dict) else {"version_number": item})
+            data = item.get("data", item) if isinstance(item, dict) else {"version_number": item}
+            if isinstance(data, dict) and isinstance(data.get("versions"), dict):
+                data = data["versions"]
+            result.append(data)
         return result
+
+    def system_attribute_capabilities(self, parent_id: int) -> dict[str, Any]:
+        """Inspect available forms without treating create-only fields as update support."""
+
+        by_type: dict[str, dict[str, bool]] = {}
+        for node_type in (0, 144):
+            response = self._request(
+                "GET", "/api/v1/forms/nodes/create",
+                params={"parent_id": parent_id, "type": node_type},
+            )
+            forms = response.json().get("forms", [])
+            main = forms[0] if forms else {}
+            properties = main.get("schema", {}).get("properties", {})
+            options = main.get("options", {}).get("fields", {})
+
+            def writable(
+                *keys: str,
+                _properties: dict[str, Any] = properties,
+                _options: dict[str, Any] = options,
+            ) -> bool:
+                for key in keys:
+                    schema = _properties.get(key)
+                    option = _options.get(key)
+                    if schema or option:
+                        return not bool((schema or {}).get("readonly")) and not bool(
+                            (option or {}).get("readonly")
+                        )
+                return False
+
+            by_type[str(node_type)] = {
+                "create_date": writable("create_date"),
+                "modify_date": writable("modify_date"),
+                "owner": writable("owner_user_id", "owner_id"),
+                "external_create_date": writable("external_create_date"),
+                "external_modify_date": writable("external_modify_date"),
+            }
+        update_response = self._request(
+            "GET", "/api/v1/forms/nodes/update", params={"id": parent_id},
+        )
+        update_forms = update_response.json().get("forms", [])
+        update_main = update_forms[0] if update_forms else {}
+        update_properties = update_main.get("schema", {}).get("properties", {})
+        update_options = update_main.get("options", {}).get("fields", {})
+
+        def update_writable(*keys: str) -> bool:
+            for key in keys:
+                schema = update_properties.get(key)
+                option = update_options.get(key)
+                if schema or option:
+                    return not bool((schema or {}).get("readonly")) and not bool(
+                        (option or {}).get("readonly")
+                    )
+            return False
+
+        node_update = {
+            "create_date": update_writable("create_date"),
+            "modify_date": update_writable("modify_date"),
+            "owner": update_writable("owner_user_id", "owner_id"),
+        }
+        node_update_qualified = all(node_update.values())
+        # The current client writes version attributes through
+        # /api/v2/nodes/{id}/versions/{version}. No discoverable pre-create form
+        # proves that contract, so it remains blocked until a tenant adapter
+        # supplies an explicitly qualified implementation.
+        version_update_qualified = False
+        return {
+            "preserves_system_dates_and_owner": (
+                node_update_qualified and version_update_qualified
+            ),
+            "node_create_forms": by_type,
+            "node_update": node_update,
+            "node_update_qualified": node_update_qualified,
+            "version_update_qualified": version_update_qualified,
+        }
 
     def find_by_migration_id(self, parent_id: int, migration_id: str) -> int | None:
         if not self.migration_category_id or not self.migration_attribute_key:
@@ -398,8 +478,8 @@ class OpenTextCloudClient:
         response = self._request(
             "GET", f"/api/v2/nodes/{target_id}/categories/{self.migration_category_id}"
         )
-        data = response.json().get("results", {}).get("data", {})
-        return str(data.get(str(self.migration_attribute_key), "")) == migration_id
+        value = _find_json_key(response.json(), str(self.migration_attribute_key))
+        return str(value or "") == migration_id
 
     def create_container(self, node: SourceNode, parent_id: int, migration_id: str) -> int:
         existing = self.find_by_migration_id(parent_id, migration_id)
@@ -633,7 +713,7 @@ class OpenTextCloudClient:
         body["roles"] = {"categories": {str(self.migration_attribute_key): migration_id}}
         return body
 
-    def _apply_migration_marker(self, target_id: int, migration_id: str) -> None:
+    def apply_migration_marker(self, target_id: int, migration_id: str) -> None:
         if not self.migration_category_id or not self.migration_attribute_key:
             raise TerminalMigrationError("Migration marker category is required for idempotent uploads")
         body = {"category_id": self.migration_category_id, str(self.migration_attribute_key): migration_id}
@@ -641,6 +721,8 @@ class OpenTextCloudClient:
             "PUT", f"/api/v2/nodes/{target_id}/categories/{self.migration_category_id}",
             expected=(200, 201, 204), data={"body": json.dumps(body)},
         )
+        if not self._migration_id_matches(target_id, migration_id):
+            raise TerminalMigrationError("Migration marker read-back did not match after update")
 
     def iter_content(self, target_id: int, version_num: int | None = None):
         endpoint = (
