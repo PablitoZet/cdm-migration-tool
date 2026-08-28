@@ -26,13 +26,16 @@ repository.
 - The canonical upstream is private; obtain its URL through the approved
   operator channel rather than storing account identifiers in documentation.
 - GitHub quality workflow passes on Python 3.11.
-- Local clean-install validation passes with 33 unit/contract tests, Ruff and
+- Local clean-install validation passes with 62 unit/contract tests, Ruff and
   mypy. The Windows bootstrap was also validated on Python 3.14; CI remains
   pinned to the canonical Python 3.11 baseline.
 - The private/home development machine cannot reach corporate PostgreSQL or
   fully qualify corporate Azure/GX39 behavior.
-- The application is ready for a first corporate smoke test, but is **not yet
-  approved for production execution**.
+- The first corporate GX39 DEV smoke run completed 19/19 objects and 12/12
+  versions with hierarchy, hashes, categories, marker read-back and destination
+  permission evidence. It is **not yet approved for production execution**
+  because system-date/owner fidelity and the wider qualification matrix remain
+  blocked.
 - Dry Run executes offline preflight before creating a run and rejects missing
   structural/category/owner/workspace mapping prerequisites without requiring
   post-Pilot operational acceptance.
@@ -45,8 +48,9 @@ repository.
   value contains an `ixos://` provider handle, not an Azure blob name. The
   application does not format these handles into false Azure paths. A bounded
   source Content Server REST adapter now streams the requested DataID/version;
-  authentication, exact content, Range/HTTP 206 behavior and measured
-  throughput still require corporate DEV qualification. DEV REST responses
+  DEV authentication and exact content were qualified against all 12 synthetic
+  versions. Measured representative/production throughput remains unqualified.
+  DEV REST responses
   use gzip/chunked transfer for some content, so the adapter requests identity
   encoding and never treats an encoded transport length as the source file
   size. DEV ignores HTTP Range; multipart recovery therefore replays the
@@ -90,6 +94,19 @@ repository.
   dates and owner are writable through qualified node-update and
   document-version-update contracts; create-form writability alone is
   insufficient.
+- The agreed fidelity direction, pending implementation and formal acceptance,
+  is: `Created By` remains the migration service account; `Owned By` maps to the
+  corresponding GX39 business user; original source dates and owner provenance
+  are stored in a dedicated `CDM Migration Provenance` category with explicit
+  labels such as `Original Source Created Date (Pre-Migration)` and
+  `Original Source Modified Date (Pre-Migration)`.
+- Owner resolution must run once per distinct source KUAF owner, never once per
+  file. Use exact login/email mappings cached for the run. Unresolved or
+  deactivated owners fail Readiness unless an explicitly approved fallback
+  principal such as `CDM Legacy Owner` is configured; the original source owner
+  remains recorded in provenance. GX39 `Owned By` assignment still requires
+  qualification for ordinary folders/documents and every Business Workspace
+  route.
 
 Use `git log -1 --oneline` to identify the exact checked-out revision. Never
 assume that a release ZIP and the Git checkout are at the same revision.
