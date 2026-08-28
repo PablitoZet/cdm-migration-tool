@@ -87,19 +87,34 @@ class PreflightAuditor:
             "A target indexed text attribute is required before Pilot or Full Cutover to prevent duplicate creates.",
         ))
         parity = self.manifest.parity_report(
-            self.env, include_qualification=for_mode not in ("pilot",)
+            self.env, include_qualification=for_mode not in ("pilot", "dry_run")
         )
-        parity_failures = [item["id"] for item in parity["checks"] if item["status"] != "PASS"]
+        parity_failures = [item["id"] for item in parity["checks"] if item["status"] == "FAIL"]
+        if for_mode == "dry_run":
+            dry_run_parity_checks = {
+                "SUPPORTED_OBJECT_TYPES",
+                "CATEGORY_SCHEMA_MAPPING",
+                "CATEGORY_ROW_FIDELITY",
+                "REFERENCE_FIDELITY",
+                "REFERENCE_SCOPE",
+                "ACTIVE_RESERVATIONS",
+                "VERSION_COMMENT_PARITY",
+                "WORKSPACE_TYPE_PARITY",
+            }
+            parity_failures = [
+                check_id for check_id in parity_failures
+                if check_id in dry_run_parity_checks
+            ]
         checks.append(Check(
             "FUNCTIONAL_PARITY",
-            "PASS" if parity["status"] == "PASS" else "FAIL",
+            "PASS" if not parity_failures else "FAIL",
             f"migration_readiness_failures={parity_failures}",
         ))
         classification = str(self.env.get("environment_class", "")).lower()
         is_production = classification == "production" or (
             not classification and getattr(self.env, "key", "") == "prod"
         )
-        if is_production:
+        if is_production and for_mode == "full":
             freeze = self.manifest.freeze_status()
             checks.append(Check(
                 "SOURCE_READ_ONLY_FREEZE",
@@ -135,10 +150,22 @@ class PreflightAuditor:
                     "SELECT DISTINCT owner_id FROM manifest_nodes WHERE owner_id IS NOT NULL"
                 )
             }
-        checks.append(Check(
-            "BLOB_LOCATORS", "PASS" if missing_locator == 0 else "FAIL",
-            f"missing={missing_locator}; every version needs a deterministic Azure/file locator.",
-        ))
+        adapter = str(self.env.get("binary_source_adapter", "azure")).lower()
+        if adapter == "content_server":
+            rest_missing = [
+                key for key in ("source_cs_url", "source_cs_user", "source_cs_password")
+                if not self.env.get(key)
+            ]
+            checks.append(Check(
+                "BLOB_LOCATORS", "PASS" if not rest_missing else "FAIL",
+                "Source Content Server REST resolves binaries by DataID/version; "
+                f"missing_configuration={rest_missing}",
+            ))
+        else:
+            checks.append(Check(
+                "BLOB_LOCATORS", "PASS" if missing_locator == 0 else "FAIL",
+                f"missing={missing_locator}; every version needs a deterministic Azure/file locator.",
+            ))
         checks.append(Check(
             "MULTIPART_SCOPE", "WARN" if heavy else "PASS",
             f"heavy_versions={heavy}, maximum_bytes={max_size}; online tenant check is mandatory when heavy_versions>0.",
@@ -214,6 +241,7 @@ class PreflightAuditor:
         except Exception as exc:
             checks.append(Check("TARGET_API", "FAIL", f"{type(exc).__name__}: {exc}"))
         if sample_blobs:
+            source = None
             try:
                 source = build_binary_source(self.env)
                 with self.manifest.connection() as conn:
@@ -231,6 +259,15 @@ class PreflightAuditor:
                 checks.append(Check("SOURCE_BLOB_SAMPLES", "PASS", f"validated={len(rows)}"))
             except Exception as exc:
                 checks.append(Check("SOURCE_BLOB_SAMPLES", "FAIL", f"{type(exc).__name__}: {exc}"))
+            finally:
+                if source is not None and hasattr(source, "close"):
+                    try:
+                        source.close()
+                    except Exception as exc:
+                        checks.append(Check(
+                            "SOURCE_BINARY_SESSION_CLEANUP", "FAIL",
+                            f"{type(exc).__name__}: {exc}",
+                        ))
 
 
 def _safe_detail(value: dict[str, Any]) -> str:

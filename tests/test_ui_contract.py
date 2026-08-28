@@ -29,6 +29,11 @@ class OperatorUiContractTests(unittest.TestCase):
 
     def test_operator_setup_uses_one_sas_url_and_separates_acceptance(self):
         self.assertIn('id="pf-azure-sas-url"', self.html)
+        self.assertIn('id="pf-source-cs-url"', self.html)
+        self.assertIn('id="pf-source-cs-user"', self.html)
+        self.assertIn('id="pf-source-cs-password"', self.html)
+        self.assertIn("exact source OwnerID on the left", self.html)
+        self.assertIn("placeholder='Example: {\"-123456\": 789012}'", self.html)
         self.assertNotIn('id="pf-azure-url"', self.html)
         self.assertNotIn('id="pf-locator"', self.html)
         self.assertNotIn('id="pf-sas-token"', self.html)
@@ -45,6 +50,25 @@ class OperatorUiContractTests(unittest.TestCase):
         self.assertIn('The app creates the selected source root inside it.', self.html)
         self.assertNotIn('R&amp;D workspace DataID', self.html)
         self.assertNotIn('Pilot setup', self.html)
+
+    def test_unconfigured_scope_never_displays_example_identifiers(self):
+        self.assertIn('id="scope-node-badge">NodeID: not configured</span>', self.html)
+        self.assertIn('id="scope-target-cloud">not configured</strong>', self.html)
+        self.assertIn("data.source_workspace_nodeid || 'not configured'", self.html)
+        self.assertIn("data.target_workspace_nodeid ? `NodeID: ${data.target_workspace_nodeid}`", self.html)
+        self.assertNotIn("NodeID: 1124604", self.html)
+        self.assertNotIn(">Cloud DEV</strong>", self.html)
+
+    def test_scan_success_uses_the_manifest_summary_contract(self):
+        self.assertIn("Number(data.total_nodes || 0).toLocaleString()", self.html)
+        self.assertNotIn("data.nodes_count.toLocaleString()", self.html)
+
+    def test_successful_setup_closes_modal_and_toasts_above_dialogs(self):
+        self.assertIn('id="toast-container" class="fixed top-5 right-5', self.html)
+        self.assertIn('style="z-index: 100;"', self.html)
+        save_success = self.html.index("showToast('Setup Saved'")
+        self.assertIn("closeModal('modal-profile');", self.html[save_success - 150:save_success])
+        self.assertIn("result.textContent = `Setup could not be saved: ${error.message}`", self.html)
 
     def test_source_freeze_is_requested_only_inside_full_cutover_confirmation(self):
         self.assertIn('id="modal-full-cutover"', self.html)

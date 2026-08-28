@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
-from engine.client import MultipartStream, _TokenManager
+from engine.client import MultipartStream, OpenTextCloudClient, _TokenManager
 from engine.config import (
     ConfigurationError,
     EnvironmentConfig,
@@ -13,13 +16,22 @@ from engine.config import (
     normalize_profile_values,
     save_config,
 )
+from engine.db import SourceDB
 from engine.instance_lock import InstanceAlreadyRunning
 from engine.manifest import ManifestStore, StateConflict
-from engine.models import ItemState, RunMode, RunStatus, UploadResult
+from engine.models import (
+    ItemState,
+    RetryableMigrationError,
+    RunMode,
+    RunStatus,
+    SourceVersion,
+    TerminalMigrationError,
+    UploadResult,
+)
 from engine.pipeline import MigrationPipeline
 from engine.preflight import PreflightAuditor
 from engine.reconciler import AutomatedVerifier
-from engine.source import LocalBinarySource
+from engine.source import AzureBlobBinarySource, ContentServerBinarySource, LocalBinarySource
 
 
 class FakeTarget:
@@ -143,6 +155,104 @@ def _config():
     }
 
 
+class _VersionCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def execute(self, query, params):
+        if "information_schema.columns" in query:
+            self.rows = [(1,)] if tuple(params) in self.connection.columns else []
+        else:
+            self.connection.version_query = query
+            self.rows = self.connection.version_rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+
+class _VersionConnection:
+    columns = {
+        ("providerdata", "providerid"),
+        ("providerdata", "providerdata"),
+        ("providerdata", "providertype"),
+        ("dversdata", "vercomment"),
+        ("dversdata", "versionid"),
+        ("dversdata", "vertype"),
+        ("dversdata", "transient"),
+    }
+
+    def __init__(self, version_rows):
+        self.version_rows = version_rows
+        self.version_query = ""
+
+    def cursor(self, **_kwargs):
+        return _VersionCursor(self)
+
+
+class _TestSourceDB(SourceDB):
+    def _cursor(self, conn):
+        return conn.cursor()
+
+
+def _version_row(provider_data="blob/content.bin", provider_type="azureblob"):
+    return {
+        "doc_source_id": 3,
+        "version_num": 1,
+        "file_name": "content.bin",
+        "mime_type": "application/octet-stream",
+        "data_size": 10,
+        "provider_id": 42,
+        "provider_type": provider_type,
+        "provider_data": provider_data,
+        "version_id": 7,
+        "ver_create_date": None,
+        "ver_modify_date": None,
+        "ver_file_date": None,
+        "version_comment": None,
+    }
+
+
+class SourceExtractionTests(unittest.TestCase):
+    def test_primary_versions_join_provider_data_and_exclude_renditions(self):
+        connection = _VersionConnection([_version_row()])
+        rows = _TestSourceDB({
+            "azure_blob_locator_template": "azure://content/{provider_data}",
+        })._extract_versions(connection, [3])
+
+        self.assertIn("LEFT JOIN public.ProviderData p ON p.ProviderID=d.ProviderID", connection.version_query)
+        self.assertIn("(d.VerType IS NULL OR d.VerType='')", connection.version_query)
+        self.assertIn("COALESCE(d.Transient,0)=0", connection.version_query)
+        self.assertEqual(rows[0]["blob_locator"], "azure://content/blob/content.bin")
+
+    def test_missing_provider_data_does_not_create_a_false_locator(self):
+        rows = _TestSourceDB({
+            "azure_blob_locator_template": "azure://content/{provider_data}",
+        })._extract_versions(_VersionConnection([_version_row(None)]), [3])
+        self.assertIsNone(rows[0]["blob_locator"])
+
+    def test_archive_center_descriptor_requires_a_qualified_binary_adapter(self):
+        descriptor = "A<1,?,'providerInfo'='ixos://archive@host','storageProviderName'='store','subProviderName'='primary'>"
+        rows = _TestSourceDB({
+            "azure_blob_locator_template": "azure://content/{provider_data}",
+        })._extract_versions(_VersionConnection([_version_row(descriptor, "acprimary")]), [3])
+        self.assertIsNone(rows[0]["blob_locator"])
+
+    def test_duplicate_primary_version_identity_fails_closed(self):
+        connection = _VersionConnection([_version_row(), {**_version_row(), "file_name": "other.bin"}])
+        with self.assertRaisesRegex(RuntimeError, "duplicate primary DVersData"):
+            _TestSourceDB({})._extract_versions(connection, [3])
+
+
 class ManifestTests(unittest.TestCase):
     def test_empty_manifest_readiness_is_not_reported_as_passed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +291,13 @@ class ManifestTests(unittest.TestCase):
             nodes, versions = _inventory(content)
             store.import_extracted_data(nodes, versions, [])
             incomplete = _config()["environments"]["dev"]
-            self.assertEqual(store.parity_report(incomplete)["status"], "FAIL")
+            incomplete_report = store.parity_report(incomplete)
+            self.assertEqual(incomplete_report["status"], "FAIL")
+            owner_check = next(
+                check for check in incomplete_report["checks"]
+                if check["id"] == "SYSTEM_ATTRIBUTE_PARITY"
+            )
+            self.assertIn("unmapped_source_owner_ids=", owner_check["detail"])
             qualified = {
                 **incomplete,
                 "permission_strategy": "inherit_target",
@@ -221,6 +337,7 @@ class ManifestTests(unittest.TestCase):
             store.import_extracted_data(nodes, versions, [])
             run_id = store.create_run("dev", RunMode.PILOT, 9000, max_documents=1)
             self.assertEqual(store.run_summary(run_id)["total_nodes"], 3)
+            store.close()
 
     def test_retry_limit_and_parent_dependency(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,6 +356,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(store.record_failure(run_id, 1, "temporary", max_attempts=2), ItemState.RETRY_WAIT)
             with self.assertRaises(StateConflict):
                 store.resolve_parent(1, 9000)
+            store.close()
 
     def test_checkpoint_survives_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,24 +375,153 @@ class ManifestTests(unittest.TestCase):
             checkpoint = store.version_transfer(run_id, 3, 1)
             self.assertEqual(checkpoint["upload_key"], "key-1")
             self.assertEqual(checkpoint["next_part"], 7)
+            store.close()
 
 
 class PipelineTests(unittest.TestCase):
+    def test_pipeline_close_releases_manifest_when_source_close_fails(self):
+        class Source:
+            def close(self):
+                raise OSError("logout failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = str(Path(tmp) / "state.db")
+            pipeline = MigrationPipeline(
+                _config(), state, target=FakeTarget(), binary_source=Source(),
+            )
+            with self.assertRaisesRegex(OSError, "logout failed"):
+                pipeline.close()
+            reopened = ManifestStore(state)
+            reopened.close()
+
+    def test_recovery_fingerprint_binds_non_secret_binary_source_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = _config()
+            base["environments"]["dev"].update({
+                "db_host": "db-a.example.invalid",
+                "db_port": 5432,
+                "db_name": "cs",
+                "db_user": "reader",
+                "sslmode": "require",
+                "binary_source_adapter": "content_server",
+                "source_cs_url": "https://source-a.example.invalid/cs/cs",
+            })
+            changed = {
+                **base,
+                "environments": {
+                    "dev": {
+                        **base["environments"]["dev"],
+                        "source_cs_url": "https://source-b.example.invalid/cs/cs",
+                    }
+                },
+            }
+            with closing(MigrationPipeline(
+                base, str(Path(tmp) / "one.db"),
+                target=FakeTarget(), binary_source=LocalBinarySource(),
+            )) as first, closing(MigrationPipeline(
+                changed, str(Path(tmp) / "two.db"),
+                target=FakeTarget(), binary_source=LocalBinarySource(),
+            )) as second:
+                self.assertNotEqual(first._config_fingerprint(), second._config_fingerprint())
+
+    def test_dry_run_rejects_missing_owner_mapping_before_creating_a_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "document.txt"
+            content.write_bytes(b"owner mapping")
+            config = _config()
+            config["environments"]["dev"].update({
+                "source_workspace_nodeid": 1,
+                "system_attribute_strategy": "preserve",
+                "owner_mappings": {},
+            })
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=FakeTarget(), binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                for node in nodes:
+                    node["owner_id"] = 42
+                pipeline.manifest.import_extracted_data(
+                    nodes, versions, [], source_root_id=1, source_profile_id="dev",
+                )
+                with self.assertRaisesRegex(TerminalMigrationError, "OWNER_MAPPING_COVERAGE"):
+                    pipeline.start_migration(dry_run=True, threads=1, mode="dry_run")
+                self.assertIsNone(pipeline.manifest.latest_run())
+
+    def test_multipart_recovery_replays_prefix_without_requiring_range(self):
+        class Source:
+            def __init__(self, content):
+                self.content = content
+                self.offsets = []
+
+            def open(self, _version, *, offset=0):
+                self.offsets.append(offset)
+                if offset:
+                    raise AssertionError("Pipeline must not require source Range support")
+                return io.BytesIO(self.content)
+
+            def validate(self, _version):
+                pass
+
+        class Target(FakeTarget):
+            multipart_threshold = 1
+            multipart_part_size = 4
+
+            def __init__(self):
+                super().__init__()
+                self.parts = []
+
+            def upload_multipart_part(self, upload_key, part_number, data, file_name):
+                self.parts.append((upload_key, part_number, data, file_name))
+
+            def complete_multipart(
+                self, upload_key, node, version, parent_id, migration_id, *, existing_target_id=None,
+            ):
+                return UploadResult(existing_target_id or 12345, version.version_num)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            content = b"0123456789"
+            path = Path(tmp) / "document.bin"
+            path.write_bytes(content)
+            source = Source(content)
+            target = Target()
+            with closing(MigrationPipeline(
+                _config(), str(Path(tmp) / "state.db"), target=target, binary_source=source,
+            )) as pipeline:
+                nodes, versions = _inventory(path)
+                versions[0]["data_size"] = len(content)
+                pipeline.manifest.import_extracted_data(nodes, versions, [])
+                run_id = pipeline.manifest.create_run("dev", RunMode.FULL, 9000)
+                pipeline.manifest.update_version_transfer(
+                    run_id, 3, 1, state=ItemState.UPLOADING,
+                    upload_key="upload-1", next_part=2, part_size=4,
+                )
+                node = pipeline.manifest.source_node(3)
+                version = pipeline.manifest.source_versions(3)[0]
+                _result, source_hash = pipeline._multipart_upload(
+                    run_id, node, version, 9000, "CDM:test:3", None,
+                )
+                self.assertEqual(source.offsets, [0])
+                self.assertEqual(
+                    [(part_number, data) for _, part_number, data, _ in target.parts],
+                    [(2, b"4567"), (3, b"89")],
+                )
+                self.assertEqual(source_hash, __import__("hashlib").sha256(content).hexdigest())
+
     def test_production_full_run_requires_freeze_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "document.txt"
             content.write_bytes(b"production")
             config = _config()
             config["environments"]["dev"]["environment_class"] = "production"
-            pipeline = MigrationPipeline(
+            with closing(MigrationPipeline(
                 config, str(Path(tmp) / "state.db"),
                 target=FakeTarget(), binary_source=LocalBinarySource(),
-            )
-            nodes, versions = _inventory(content)
-            pipeline.manifest.import_extracted_data(nodes, versions, [])
-            with self.assertRaisesRegex(Exception, "source read-only freeze"):
-                pipeline.start_migration(threads=1, mode="full")
-            pipeline.close()
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                pipeline.manifest.import_extracted_data(nodes, versions, [])
+                with self.assertRaisesRegex(Exception, "source read-only freeze"):
+                    pipeline.start_migration(threads=1, mode="full")
 
     def test_preserve_strategy_applies_node_and_version_system_attributes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -284,66 +531,70 @@ class PipelineTests(unittest.TestCase):
             config["environments"]["dev"]["system_attribute_strategy"] = "preserve"
             config["environments"]["dev"]["owner_mappings"] = {"42": 4200}
             target = FakeTarget()
-            pipeline = MigrationPipeline(
+            with closing(MigrationPipeline(
                 config, str(Path(tmp) / "state.db"),
                 target=target, binary_source=LocalBinarySource(),
-            )
-            nodes, versions = _inventory(content)
-            for node in nodes:
-                node.update({"source_created_at": "2024-01-01T00:00:00Z", "owner_id": 42})
-            versions[0]["source_created_at"] = "2024-01-02T00:00:00Z"
-            pipeline.manifest.import_extracted_data(nodes, versions, [])
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                for node in nodes:
+                    node.update({"source_created_at": "2024-01-01T00:00:00Z", "owner_id": 42})
+                versions[0]["source_created_at"] = "2024-01-02T00:00:00Z"
+                pipeline.manifest.import_extracted_data(nodes, versions, [])
 
-            run_id = pipeline.start_migration(threads=2, mode="full")
-            self.assertTrue(pipeline.wait(5))
-            self.assertEqual(pipeline.manifest.run_status(run_id)["status"], RunStatus.COMPLETED)
-            version_calls = [call for call in target.system_attribute_calls if call[2] is not None]
-            self.assertEqual(len(version_calls), 1)
-            self.assertEqual(version_calls[0][2], 1)
+                run_id = pipeline.start_migration(threads=2, mode="full")
+                self.assertTrue(pipeline.wait(5))
+                self.assertEqual(pipeline.manifest.run_status(run_id)["status"], RunStatus.COMPLETED)
+                version_calls = [call for call in target.system_attribute_calls if call[2] is not None]
+                self.assertEqual(len(version_calls), 1)
+                self.assertEqual(version_calls[0][2], 1)
 
     def test_dry_run_isolated_then_full_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "document.txt"
             content.write_bytes(b"production-like bytes\x00with binary")
-            pipeline = MigrationPipeline(
-                _config(), str(Path(tmp) / "state.db"),
+            config = _config()
+            config["environments"]["dev"]["source_workspace_nodeid"] = 1
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
                 target=FakeTarget(), binary_source=LocalBinarySource(),
-            )
-            nodes, versions = _inventory(content)
-            pipeline.manifest.import_extracted_data(nodes, versions, [])
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                pipeline.manifest.import_extracted_data(
+                    nodes, versions, [], source_root_id=1, source_profile_id="dev",
+                )
 
-            dry_id = pipeline.start_migration(dry_run=True, threads=2, mode="dry_run")
-            self.assertTrue(pipeline.wait(5))
-            dry = pipeline.manifest.run_status(dry_id)
-            self.assertEqual(dry["simulated_nodes"], 3)
-            self.assertIsNone(pipeline.manifest.lookup_mapping(1))
+                dry_id = pipeline.start_migration(dry_run=True, threads=2, mode="dry_run")
+                self.assertTrue(pipeline.wait(5))
+                dry = pipeline.manifest.run_status(dry_id)
+                self.assertEqual(dry["simulated_nodes"], 3)
+                self.assertIsNone(pipeline.manifest.lookup_mapping(1))
 
-            full_id = pipeline.start_migration(threads=2, mode="full")
-            self.assertTrue(pipeline.wait(5))
-            full = pipeline.manifest.run_status(full_id)
-            self.assertEqual(full["status"], RunStatus.COMPLETED)
-            self.assertEqual(full["verified_nodes"], 3)
-            self.assertEqual(pipeline.manifest.lookup_mapping(3)["name"], "document.txt")
-            transfer = pipeline.manifest.version_transfer(full_id, 3, 1)
-            self.assertEqual(transfer["state"], ItemState.VERIFIED)
-            self.assertEqual(transfer["source_sha256"], transfer["target_sha256"])
+                full_id = pipeline.start_migration(threads=2, mode="full")
+                self.assertTrue(pipeline.wait(5))
+                full = pipeline.manifest.run_status(full_id)
+                self.assertEqual(full["status"], RunStatus.COMPLETED)
+                self.assertEqual(full["verified_nodes"], 3)
+                self.assertEqual(pipeline.manifest.lookup_mapping(3)["name"], "document.txt")
+                transfer = pipeline.manifest.version_transfer(full_id, 3, 1)
+                self.assertEqual(transfer["state"], ItemState.VERIFIED)
+                self.assertEqual(transfer["source_sha256"], transfer["target_sha256"])
 
     def test_ambiguous_create_is_reconciled_by_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "document.txt"
             content.write_bytes(b"remote commit then response loss")
             target = AmbiguousOnceTarget()
-            pipeline = MigrationPipeline(
+            with closing(MigrationPipeline(
                 _config(), str(Path(tmp) / "state.db"),
                 target=target, binary_source=LocalBinarySource(),
-            )
-            nodes, versions = _inventory(content)
-            pipeline.manifest.import_extracted_data(nodes, versions, [])
-            run_id = pipeline.start_migration(threads=2, mode="full")
-            self.assertTrue(pipeline.wait(5))
-            self.assertEqual(pipeline.manifest.run_status(run_id)["status"], RunStatus.COMPLETED)
-            document_nodes = [node for node in target.nodes.values() if node["name"] == "document.txt"]
-            self.assertEqual(len(document_nodes), 1)
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                pipeline.manifest.import_extracted_data(nodes, versions, [])
+                run_id = pipeline.start_migration(threads=2, mode="full")
+                self.assertTrue(pipeline.wait(5))
+                self.assertEqual(pipeline.manifest.run_status(run_id)["status"], RunStatus.COMPLETED)
+                document_nodes = [node for node in target.nodes.values() if node["name"] == "document.txt"]
+                self.assertEqual(len(document_nodes), 1)
 
 
 class VerificationTests(unittest.TestCase):
@@ -367,9 +618,259 @@ class VerificationTests(unittest.TestCase):
             self.assertEqual(report["overall_status"], "FAIL")
             category_test = next(test for test in report["tests"] if test["id"] == "TEST_03_CATEGORY_VALUES")
             self.assertEqual(category_test["status"], "FAIL")
+            store.close()
 
 
 class TransportTests(unittest.TestCase):
+    def test_source_content_server_streams_the_requested_version(self):
+        class Response:
+            def __init__(self, status, *, payload=None, content=b""):
+                self.status_code = status
+                self._payload = payload or {}
+                self.headers = {"Content-Length": str(len(content))} if content else {}
+                self.raw = io.BytesIO(content)
+                self.raw.decode_content = False
+
+            def json(self):
+                return self._payload
+
+            def close(self):
+                pass
+
+        class Session:
+            def __init__(self):
+                self.verify = None
+                self.get_calls = []
+
+            def post(self, *_args, **_kwargs):
+                return Response(200, payload={"ticket": "fixture-ticket"})
+
+            def head(self, *_args, **_kwargs):
+                return Response(200)
+
+            def get(self, url, **kwargs):
+                self.get_calls.append((url, kwargs))
+                return Response(200, content=b"source-version")
+
+            def delete(self, *_args, **_kwargs):
+                return Response(200)
+
+            def close(self):
+                pass
+
+        session = Session()
+        source = ContentServerBinarySource(
+            "https://source.example.invalid/cs/cs", "fixture-user", "fixture-password",
+            session=session,
+        )
+        version = SourceVersion(123, 2, "sample.bin", "application/octet-stream", 14)
+        source.validate(version)
+        with source.open(version) as stream:
+            self.assertEqual(stream.read(), b"source-version")
+        self.assertTrue(all(
+            call[0].endswith("/api/v2/nodes/123/versions/2/content")
+            for call in session.get_calls
+        ))
+        self.assertTrue(all(call[1]["stream"] for call in session.get_calls))
+        self.assertTrue(all(
+            call[1]["headers"]["Accept-Encoding"] == "identity"
+            for call in session.get_calls
+        ))
+        source.close()
+
+    def test_source_content_server_ignores_encoded_transport_length(self):
+        class Response:
+            status_code = 200
+            headers = {"Content-Length": "31", "Content-Encoding": "gzip"}
+            raw = io.BytesIO(b"source-version")
+            raw.decode_content = False
+
+            def json(self):
+                return {"ticket": "fixture-ticket"}
+
+            def close(self):
+                pass
+
+        class Session:
+            verify = None
+
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+            def close(self):
+                pass
+
+        source = ContentServerBinarySource(
+            "https://source.example.invalid/cs/cs", "fixture-user", "fixture-password",
+            session=Session(),
+        )
+        version = SourceVersion(123, 1, "sample.bin", "application/octet-stream", 14)
+        with source.open(version) as stream:
+            self.assertEqual(stream.read(), b"source-version")
+
+    def test_source_content_server_rejects_decoded_bytes_beyond_manifest_size(self):
+        class Response:
+            status_code = 200
+            headers = {"Content-Length": "31", "Content-Encoding": "gzip"}
+            raw = io.BytesIO(b"source-version-extra")
+            raw.decode_content = False
+
+            def json(self):
+                return {"ticket": "fixture-ticket"}
+
+            def close(self):
+                pass
+
+        class Session:
+            verify = None
+
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+            def close(self):
+                pass
+
+        source = ContentServerBinarySource(
+            "https://source.example.invalid/cs/cs", "fixture-user", "fixture-password",
+            session=Session(),
+        )
+        version = SourceVersion(123, 1, "sample.bin", "application/octet-stream", 14)
+        with (
+            self.assertRaisesRegex(OSError, "exceeds the declared version size"),
+            source.open(version) as stream,
+        ):
+            stream.read(14)
+
+    def test_source_content_server_retries_transient_authentication(self):
+        class Response:
+            headers = {}
+
+            def __init__(self, status):
+                self.status_code = status
+
+            def json(self):
+                return {"ticket": "fixture-ticket"}
+
+            def close(self):
+                pass
+
+        class Session:
+            verify = None
+
+            def __init__(self):
+                self.statuses = iter((503, 200))
+                self.calls = 0
+
+            def post(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response(next(self.statuses))
+
+            def close(self):
+                pass
+
+        session = Session()
+        source = ContentServerBinarySource(
+            "https://source.example.invalid/cs/cs", "fixture-user", "fixture-password",
+            max_retries=2, session=session,
+        )
+        with patch("engine.source.time.sleep"):
+            self.assertEqual(source._authenticate(), "fixture-ticket")
+        self.assertEqual(session.calls, 2)
+
+    def test_source_content_server_exhausted_download_is_retryable(self):
+        class Response:
+            headers = {}
+
+            def __init__(self, status):
+                self.status_code = status
+
+            def json(self):
+                return {"ticket": "fixture-ticket"}
+
+            def close(self):
+                pass
+
+        class Session:
+            verify = None
+
+            def post(self, *_args, **_kwargs):
+                return Response(200)
+
+            def get(self, *_args, **_kwargs):
+                return Response(503)
+
+            def close(self):
+                pass
+
+        source = ContentServerBinarySource(
+            "https://source.example.invalid/cs/cs", "fixture-user", "fixture-password",
+            max_retries=1, session=Session(),
+        )
+        version = SourceVersion(123, 1, "sample.bin", "application/octet-stream", 14)
+        with self.assertRaisesRegex(RetryableMigrationError, "temporarily failed"):
+            source.open(version)
+
+    def test_source_content_server_logout_failure_is_best_effort(self):
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return {"ticket": "fixture-ticket"}
+
+            def close(self):
+                pass
+
+        class Session:
+            verify = None
+
+            def __init__(self):
+                self.closed = False
+
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+            def delete(self, *_args, **_kwargs):
+                raise OSError("logout failed")
+
+            def close(self):
+                self.closed = True
+
+        session = Session()
+        source = ContentServerBinarySource(
+            "https://source.example.invalid/cs/cs", "fixture-user", "fixture-password",
+            session=session,
+        )
+        source._token_manager.get()
+        with self.assertLogs("CDM.Source", level="WARNING"):
+            source.close()
+        self.assertTrue(session.closed)
+
+    def test_http_clients_enable_native_certificate_store(self):
+        with patch("engine.client.configure_native_trust_store") as configure_target:
+            OpenTextCloudClient({"ot_cloud_url": "https://example.invalid"}, max_retries=1)
+            configure_target.assert_called_once_with()
+
+        source = AzureBlobBinarySource("https://storage.example.invalid")
+        version = SourceVersion(
+            1, 1, "sample.bin", "application/octet-stream", 1,
+            blob_locator="azure://content/sample.bin",
+        )
+        with patch("engine.source.configure_native_trust_store") as configure_source:
+            source._client(version)
+            configure_source.assert_called_once_with()
+
+    def test_windows_drive_path_is_not_treated_as_a_url_scheme(self):
+        locator = r"C:\content\sample.bin"
+        version = SourceVersion(1, 1, "sample.bin", "application/octet-stream", 1, blob_locator=locator)
+        self.assertEqual(LocalBinarySource._path(version), Path(locator))
+
     def test_stale_ticket_is_verified_before_reauthentication(self):
         authenticated: list[str] = []
         verified: list[str] = []
@@ -428,6 +929,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(values["migration_category_id"], 45678)
         self.assertEqual(values["migration_namespace"], "cdm-prod")
 
+    def test_source_content_server_url_selects_the_rest_binary_adapter(self):
+        values = normalize_profile_values("test", {
+            "source_cs_url": "https://source.example.invalid/cs/cs/",
+            "azure_storage_sas_url": (
+                "https://storage.example.invalid/content?sv=placeholder&sp=rl&sig=placeholder"
+            ),
+        })
+        self.assertEqual(values["source_cs_url"], "https://source.example.invalid/cs/cs")
+        self.assertEqual(values["binary_source_adapter"], "content_server")
+
     def test_migration_policy_uses_fixed_business_defaults(self):
         values = normalize_profile_values("dev", {
             "source_root_maps_to_target": True,
@@ -460,7 +971,8 @@ class ConfigTests(unittest.TestCase):
             save_config(config, path)
             persisted = path.read_text(encoding="utf-8")
             self.assertIn("fixture-db-value", persisted)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_arbitrary_production_profile_uses_the_same_local_secret_model(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -486,6 +998,93 @@ class ConfigTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_online_source_sample_always_closes_binary_source(self):
+        class Source:
+            def __init__(self):
+                self.closed = False
+
+            def validate(self, _version):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        class Target:
+            def test_connection(self):
+                return {"status": "connected"}
+
+            def get_node(self, target_id):
+                return {"id": target_id, "name": "target", "type": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.bin"
+            content.write_bytes(b"sample")
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes, versions = _inventory(content)
+            store.import_extracted_data(
+                nodes, versions, [], source_root_id=1, source_profile_id="qa",
+            )
+            values = {
+                **_config()["environments"]["dev"],
+                "source_workspace_nodeid": 1,
+            }
+            source = Source()
+            with (
+                patch("engine.preflight.SourceDB.test_connection", return_value={"status": "connected"}),
+                patch("engine.preflight.OpenTextCloudClient", return_value=Target()),
+                patch("engine.preflight.build_binary_source", return_value=source),
+            ):
+                PreflightAuditor(EnvironmentConfig("qa", values), store, {}).run(
+                    online=True, sample_blobs=1,
+                )
+            self.assertTrue(source.closed)
+            store.close()
+
+    def test_production_freeze_is_required_only_for_full_cutover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.bin"
+            content.write_bytes(b"freeze boundary")
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes, versions = _inventory(content)
+            store.import_extracted_data(
+                nodes, versions, [], source_root_id=1, source_profile_id="prod",
+            )
+            values = {
+                **_config()["environments"]["dev"],
+                "environment_class": "production",
+                "source_workspace_nodeid": 1,
+            }
+            auditor = PreflightAuditor(EnvironmentConfig("prod", values), store, {})
+            dry = auditor.run(for_mode="dry_run")
+            full = auditor.run(for_mode="full")
+            self.assertNotIn("SOURCE_READ_ONLY_FREEZE", {check["id"] for check in dry["checks"]})
+            freeze = next(check for check in full["checks"] if check["id"] == "SOURCE_READ_ONLY_FREEZE")
+            self.assertEqual(freeze["status"], "FAIL")
+            store.close()
+    def test_content_server_rest_replaces_direct_blob_locator_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.bin"
+            content.write_bytes(b"rest")
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes, versions = _inventory(content)
+            versions[0]["blob_locator"] = None
+            store.import_extracted_data(
+                nodes, versions, [], source_root_id=1, source_profile_id="qa",
+            )
+            values = {
+                **_config()["environments"]["dev"],
+                "binary_source_adapter": "content_server",
+                "source_workspace_nodeid": 1,
+                "source_cs_url": "https://source.example.invalid/cs/cs",
+                "source_cs_user": "fixture-user",
+                "source_cs_password": "fixture-password",
+            }
+            report = PreflightAuditor(EnvironmentConfig("qa", values), store, {}).run()
+            locator = next(check for check in report["checks"] if check["id"] == "BLOB_LOCATORS")
+            self.assertEqual(locator["status"], "PASS")
+            self.assertIn("DataID/version", locator["detail"])
+            store.close()
+
     def test_pilot_defers_only_gx39_qualification_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "content.bin"

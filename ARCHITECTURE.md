@@ -36,7 +36,7 @@ Their exclusion requires an explicit Acceptance decision.
 | `engine/db.py` | Repeatable-read, read-only recursive source extraction |
 | `engine/inventory.py` | Deterministic scope signature |
 | `engine/manifest.py` | SQLite inventory, runs, leases, mappings, multipart checkpoints and backup |
-| `engine/source.py` | Bounded-memory Azure/local binary streams |
+| `engine/source.py` | Bounded-memory source Content Server REST, Azure and local binary streams |
 | `engine/client.py` | GX39 authentication, rate limiting, REST calls and multipart protocol |
 | `engine/pipeline.py` | Phase ordering, worker execution, retry classification and recovery |
 | `engine/preflight.py` | Fail-closed readiness checks |
@@ -72,13 +72,20 @@ Tenant ID mappings remain explicit exceptions:
 - source owner ID to GX39 user ID;
 - Business Workspace subtype/type to target workspace type/template.
 
+Direct Azure reads require source provider metadata that resolves
+deterministically to a blob locator. Archive Center `acprimary`/`ixos`
+descriptors are treated as opaque handles; those versions stream through the
+read-only source Content Server REST endpoint by DataID and version. Range-based
+multipart recovery remains fail-closed unless the source returns HTTP 206.
+
 ## Inventory and source signature
 
 `engine/db.py` opens one repeatable-read, read-only PostgreSQL snapshot and
 extracts:
 
 - the root and descendants from `DTree`;
-- all document version records and binary locators;
+- primary document version records from `DVersData`, excluding renditions and
+  transient rows, with binary locators resolved through `ProviderData`;
 - source category values.
 
 The manifest stores the active profile ID and source root. Reusing an inventory
@@ -150,7 +157,7 @@ The GX39 client provides:
 - `Retry-After` handling;
 - explicit safe/unsafe retry classification;
 - separate connect/read timeouts;
-- TLS verification.
+- TLS verification through the native operating-system certificate store.
 
 Create and multipart completion calls are not blindly retried. Unknown commit
 outcomes must be reconciled with the migration attribute and read-back.
@@ -163,7 +170,9 @@ Ordinary versions use streaming multipart/form-data with a deterministic
 Large versions use GX39 multipart upload. The default threshold is 50 MiB and
 part size is 16 MiB. Only a bounded part is materialized at a time. The manifest
 stores upload key, next part, size and hashes so recovery continues from a saved
-checkpoint.
+checkpoint. Recovery reopens the source at byte zero, streams the completed
+prefix once to reconstruct SHA-256 and continues with the same stream; source
+HTTP Range support is therefore an optimization, not a correctness dependency.
 
 Default execution starts with eight document workers and one large-file slot.
 These are conservative defaults, not a certified production optimum.

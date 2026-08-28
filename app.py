@@ -109,6 +109,7 @@ class ProfileRequest(BaseModel):
 
 class CredentialRequest(BaseModel):
     db_password: str | None = None
+    source_cs_password: str | None = None
     ot_cloud_password: str | None = None
     azure_storage_sas_token: str | None = None
     azure_storage_sas_url: str | None = None
@@ -131,6 +132,7 @@ PROFILE_EDITABLE_KEYS = {
     "source_workspace_nodeid", "target_workspace_nodeid", "source_root_maps_to_target",
     "db_host", "db_port", "db_name", "db_user", "db_password_env", "sslmode",
     "db_connect_timeout", "db_statement_timeout_ms",
+    "source_cs_url", "source_cs_user", "source_cs_password_env", "source_read_timeout_seconds",
     "binary_source_adapter", "azure_storage_account_url", "azure_storage_sas_token_env",
     "azure_storage_sas_url_env",
     "azure_blob_locator_template",

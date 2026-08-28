@@ -154,29 +154,81 @@ class SourceDB:
         return rows
 
     def _extract_versions(self, conn, node_ids: list[int]) -> list[dict[str, Any]]:
-        provider_data_expr = "ProviderData" if self._column_exists(conn, "dversdata", "providerdata") else "NULL::text"
+        if self._column_exists(conn, "dversdata", "providerdata"):
+            provider_data_expr = "d.ProviderData"
+            provider_type_expr = "NULL::text"
+            provider_data_join = ""
+        elif (
+            self._column_exists(conn, "providerdata", "providerid")
+            and self._column_exists(conn, "providerdata", "providerdata")
+        ):
+            provider_data_expr = "p.ProviderData"
+            provider_type_expr = (
+                "p.ProviderType"
+                if self._column_exists(conn, "providerdata", "providertype")
+                else "NULL::text"
+            )
+            provider_data_join = "LEFT JOIN public.ProviderData p ON p.ProviderID=d.ProviderID"
+        else:
+            provider_data_expr = "NULL::text"
+            provider_type_expr = "NULL::text"
+            provider_data_join = ""
         comment_column = self._first_existing_column(conn, "dversdata", ("vercomment", "comment", "description"))
-        comment_expr = comment_column if comment_column else "NULL::text"
+        comment_expr = f"d.{comment_column}" if comment_column else "NULL::text"
+        version_id_expr = (
+            "d.VersionID" if self._column_exists(conn, "dversdata", "versionid") else "NULL::bigint"
+        )
+        primary_filter = (
+            "AND (d.VerType IS NULL OR d.VerType='')"
+            if self._column_exists(conn, "dversdata", "vertype") else ""
+        )
+        transient_filter = (
+            "AND COALESCE(d.Transient,0)=0"
+            if self._column_exists(conn, "dversdata", "transient") else ""
+        )
         query = f"""
-            SELECT DocID doc_source_id,Version version_num,FileName file_name,MimeType mime_type,
-                   DataSize data_size,ProviderID provider_id,{provider_data_expr} provider_data,
-                   VerCDate ver_create_date,VerMDate ver_modify_date,FileMDate ver_file_date,
+            SELECT d.DocID doc_source_id,d.Version version_num,d.FileName file_name,d.MimeType mime_type,
+                   d.DataSize data_size,d.ProviderID provider_id,{provider_type_expr} provider_type,
+                   {provider_data_expr} provider_data,
+                   d.VerCDate ver_create_date,d.VerMDate ver_modify_date,d.FileMDate ver_file_date,
+                   {version_id_expr} version_id,
                    {comment_expr} version_comment
-              FROM public.DVersData WHERE DocID=ANY(%s) ORDER BY DocID,Version
+              FROM public.DVersData d
+              {provider_data_join}
+             WHERE d.DocID=ANY(%s)
+                   {primary_filter}
+                   {transient_filter}
+             ORDER BY d.DocID,d.Version
         """
         with self._cursor(conn) as cur:
             cur.execute(query, (node_ids,))
             rows = [dict(row) for row in cur.fetchall()]
         template = self.config.get("azure_blob_locator_template")
+        seen: set[tuple[int, int]] = set()
         for row in rows:
+            identity = (int(row["doc_source_id"]), int(row["version_num"]))
+            if identity in seen:
+                raise RuntimeError(
+                    "Source contains duplicate primary DVersData rows for one document version; "
+                    "a lossless manifest cannot be created"
+                )
+            seen.add(identity)
             provider_data = row.get("provider_data")
-            if template:
-                row["blob_locator"] = str(template).format(**row)
-            elif isinstance(provider_data, str) and provider_data.startswith(("https://", "azure://", "file://")):
+            if isinstance(provider_data, str) and provider_data.startswith(("https://", "azure://", "file://")):
                 row["blob_locator"] = provider_data
+            elif self._is_archive_center_descriptor(row.get("provider_type"), provider_data):
+                row["blob_locator"] = None
+            elif template and provider_data not in (None, ""):
+                row["blob_locator"] = str(template).format(**row)
             else:
                 row["blob_locator"] = None
         return rows
+
+    @staticmethod
+    def _is_archive_center_descriptor(provider_type: Any, provider_data: Any) -> bool:
+        provider = str(provider_type or "").lower()
+        descriptor = str(provider_data or "").lower()
+        return provider.startswith("ac") or "'providerinfo'='ixos://" in descriptor
 
     def _extract_categories(self, conn, node_ids: list[int]) -> list[dict[str, Any]]:
         # This extracts primitive LLAttrData values. Complex sets/multi-row

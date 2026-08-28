@@ -23,6 +23,7 @@ from .models import (
     TerminalMigrationError,
     UploadResult,
 )
+from .tls import configure_native_trust_store
 
 logger = logging.getLogger("CDM.OpenText")
 
@@ -168,6 +169,7 @@ class ResponseInfo:
 
 class OpenTextCloudClient:
     def __init__(self, cloud_config: Any, max_retries: int = 5):
+        configure_native_trust_store()
         try:
             import requests
         except ImportError as exc:

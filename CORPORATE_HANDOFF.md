@@ -26,12 +26,36 @@ repository.
 - The canonical upstream is private; obtain its URL through the approved
   operator channel rather than storing account identifiers in documentation.
 - GitHub quality workflow passes on Python 3.11.
-- Local clean-install validation passes with 31 unit/contract tests, Ruff and
-  mypy.
+- Local clean-install validation passes with 33 unit/contract tests, Ruff and
+  mypy. The Windows bootstrap was also validated on Python 3.14; CI remains
+  pinned to the canonical Python 3.11 baseline.
 - The private/home development machine cannot reach corporate PostgreSQL or
   fully qualify corporate Azure/GX39 behavior.
 - The application is ready for a first corporate smoke test, but is **not yet
   approved for production execution**.
+- Dry Run executes offline preflight before creating a run and rejects missing
+  structural/category/owner/workspace mapping prerequisites without requiring
+  post-Pilot operational acceptance.
+- The first DEV smoke test confirmed that this Content Server schema stores
+  binary locator data in `ProviderData.ProviderData`, referenced by
+  `DVersData.ProviderID`, and that `DVersData` also contains `otthumb`
+  renditions. Extraction now selects only non-transient primary versions and
+  fails closed on duplicate primary version identities.
+- The DEV primary provider is Archive Center `acprimary`; its `ProviderData`
+  value contains an `ixos://` provider handle, not an Azure blob name. The
+  application does not format these handles into false Azure paths. A bounded
+  source Content Server REST adapter now streams the requested DataID/version;
+  authentication, exact content, Range/HTTP 206 behavior and measured
+  throughput still require corporate DEV qualification. DEV REST responses
+  use gzip/chunked transfer for some content, so the adapter requests identity
+  encoding and never treats an encoded transport length as the source file
+  size. DEV ignores HTTP Range; multipart recovery therefore replays the
+  completed prefix from byte zero in one bounded-memory stream before resuming
+  at the saved GX39 part. The configured
+  unexpired container SAS had `r/l` permissions but returned Azure
+  `AuthorizationFailure`; container identity/network policy also remains to be
+  resolved. Actual Azure binary reads and the production source schema remain
+  unqualified.
 
 Use `git log -1 --oneline` to identify the exact checked-out revision. Never
 assume that a release ZIP and the Git checkout are at the same revision.
@@ -42,6 +66,14 @@ The refactor intentionally favors a small internal-operator workflow over a
 commercial migration-product UX.
 
 - The server binds to `127.0.0.1:8110` and starts without an API key.
+- Successful profile saves close Migration Setup and render confirmation toasts
+  above modal overlays so operators can see the outcome. Save errors also render
+  inline inside Migration Setup and do not depend on a transient toast.
+- Migration Readiness lists missing source owner IDs locally so the operator can
+  populate the exact GX39 Member ID mapping without exposing account names. The
+  Owners field includes the required JSON direction and syntax example.
+- Verified GX39 and Azure HTTPS connections use the native operating-system
+  certificate store, including approved corporate CAs installed on Windows.
 - Profiles and credentials are configured in the UI.
 - Credentials are intentionally stored in local `config.json`, protected with
   mode `0600` where supported. The file is ignored by Git and release builds.
@@ -141,7 +173,7 @@ corporate machine.
 
 The following are explicitly unknown until tested against corporate systems:
 
-- exact PostgreSQL schema/provider data for the chosen source;
+- production PostgreSQL schema/provider data and exact source inventory;
 - Azure locator construction and representative binary access;
 - GX39 REST shapes for container/document creation;
 - first and subsequent version semantics;
@@ -161,9 +193,10 @@ scatter tenant response-shape exceptions through the pipeline.
 ## 6. Important limitation of the current Dry Run
 
 Current Dry Run validates manifest structure, node rules, version sizes recorded
-in the manifest and the presence of binary locators. It does **not** open and
-stream every Azure Blob and therefore does not prove that every production
-binary is readable or byte-correct.
+in the manifest and the selected binary-source configuration. It does **not**
+open and stream every Azure Blob or source Content Server REST version and
+therefore does not prove that every production binary is readable or
+byte-correct.
 
 The online preflight can sample Blob properties, but a sample is not complete
 source evidence. Do not report Dry Run as a full binary-integrity test.

@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 
 SECRET_KEYS = {
     "db_password": "CDM_DB_PASSWORD",
+    "source_cs_password": "CDM_SOURCE_CS_PASSWORD",
     "ot_cloud_password": "CDM_OT_PASSWORD",
     "azure_storage_sas_token": "CDM_AZURE_SAS_TOKEN",
     "azure_storage_sas_url": "CDM_AZURE_SAS_URL",
@@ -79,6 +80,13 @@ def normalize_profile_values(profile_id: str, raw: dict[str, Any]) -> dict[str, 
         values["azure_storage_account_url"] = f"{parsed.scheme}://{parsed.netloc}"
         values["azure_storage_sas_token"] = token
         values["azure_blob_locator_template"] = f"azure://{path_parts[0]}/{{provider_data}}"
+    source_cs_url = str(values.get("source_cs_url") or "").strip().rstrip("/")
+    if source_cs_url:
+        parsed = urlparse(source_cs_url)
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            raise ConfigurationError("Source Content Server REST URL must be a complete HTTPS URL")
+        values["source_cs_url"] = source_cs_url
+        values["binary_source_adapter"] = "content_server"
     return values
 
 

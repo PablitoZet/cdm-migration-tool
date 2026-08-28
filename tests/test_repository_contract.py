@@ -32,6 +32,7 @@ class RepositoryContractTests(unittest.TestCase):
         for profile in payload["environments"].values():
             for key in (
                 "db_password",
+                "source_cs_password",
                 "ot_cloud_password",
                 "azure_storage_sas_url",
                 "azure_storage_sas_token",
@@ -47,6 +48,12 @@ class RepositoryContractTests(unittest.TestCase):
 
         payload = tomllib.loads((self.root / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(payload["project"]["version"], VERSION)
+
+    def test_windows_bootstrap_stops_after_native_command_failure(self):
+        script = (self.root / "bootstrap.ps1").read_text(encoding="utf-8")
+        self.assertIn('Assert-NativeSuccess "Virtual environment creation" $LASTEXITCODE', script)
+        self.assertIn('Assert-NativeSuccess "Dependency installation" $LASTEXITCODE', script)
+        self.assertIn('Assert-NativeSuccess "Unit tests" $LASTEXITCODE', script)
 
 
 if __name__ == "__main__":

@@ -91,10 +91,10 @@
           <span class="text-slate-500 font-medium">Active Workspace:</span>
           <span class="font-bold text-slate-100" id="scope-workspace-title">Selected source scope</span>
           <span class="text-slate-700">&bull;</span>
-          <span class="font-mono text-sky-400 font-medium" id="scope-node-badge">NodeID: 1124604</span>
+          <span class="font-mono text-sky-400 font-medium" id="scope-node-badge">NodeID: not configured</span>
         </div>
         <div class="flex items-center space-x-3 text-[11px] text-slate-400">
-          <span>Target: <strong class="text-slate-200" id="scope-target-cloud">Cloud DEV</strong></span>
+          <span>Target: <strong class="text-slate-200" id="scope-target-cloud">not configured</strong></span>
         </div>
       </div>
 
@@ -389,7 +389,7 @@
   </main>
 
   <!-- TOAST NOTIFICATION CONTAINER -->
-  <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+  <div id="toast-container" class="fixed top-5 right-5 flex flex-col space-y-2 pointer-events-none" style="z-index: 100;"></div>
 
   <!-- EXTRACT RESET CONFIRMATION MODAL -->
   <div id="modal-extract-confirm" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
@@ -545,11 +545,22 @@
 
       <section class="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
         <div><h4 class="text-sm font-semibold text-slate-100">3. Source document files</h4>
-          <p class="text-[11px] text-slate-500">Paste one container-level SAS URL. The app derives the storage account, container, token and blob locator automatically.</p></div>
-        <label class="block text-xs">Azure Container SAS URL
+          <p class="text-[11px] text-slate-500">Archive Center sources use the read-only Content Server REST API. Direct Azure is used only when source metadata contains real blob paths.</p></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+          <label class="md:col-span-2">Source Content Server REST URL
+            <input id="pf-source-cs-url" class="field" placeholder="https://.../cs/cs">
+          </label>
+          <label>REST user<input id="pf-source-cs-user" class="field"></label>
+          <label>REST password<input id="pf-source-cs-password" type="password" class="field" autocomplete="new-password"></label>
+        </div>
+        <p class="text-[11px] text-slate-400">Required when Readiness reports Archive Center <span class="mono">acprimary/ixos</span>. Content is streamed by DataID and version; it is not staged on disk.</p>
+        <details>
+          <summary class="text-[11px] text-slate-400 cursor-pointer">Direct Azure alternative</summary>
+          <label class="block text-xs mt-2">Azure Container SAS URL
           <input id="pf-azure-sas-url" type="password" class="field" autocomplete="new-password" placeholder="https://account.blob.core.windows.net/container?sv=...">
-        </label>
-        <p class="text-[11px] text-amber-300/80">Use a SAS for the complete content container. A URL generated for one individual blob cannot migrate the full workspace.</p>
+          </label>
+          <p class="text-[11px] text-amber-300/80">Use only when provider metadata resolves directly to blob names. Archive Center ixos handles cannot be placed into this field.</p>
+        </details>
       </section>
 
       <details class="bg-slate-950 border border-slate-800 rounded-xl p-4">
@@ -565,8 +576,8 @@
             <textarea id="pf-workspace-map" rows="4" class="field mono">{}</textarea>
           </label>
           <label>Owners
-            <span class="block text-[10px] text-slate-500 mt-1">Source user IDs → GX39 user IDs when dates and owners are preserved.</span>
-            <textarea id="pf-owner-map" rows="3" class="field mono">{}</textarea>
+            <span class="block text-[10px] text-slate-500 mt-1">JSON mapping required when Readiness lists an owner: exact source OwnerID on the left → GX39 Member ID of the same person on the right.</span>
+            <textarea id="pf-owner-map" rows="3" class="field mono" placeholder='Example: {"-123456": 789012}'>{}</textarea>
           </label>
         </div>
       </details>
@@ -752,9 +763,10 @@
         if (data.workspace_title) {
           document.getElementById('scope-workspace-title').textContent = data.workspace_title;
         }
-        if (data.source_workspace_nodeid) {
-          document.getElementById('scope-node-badge').textContent = `NodeID: ${data.source_workspace_nodeid}`;
-        }
+        document.getElementById('scope-node-badge').textContent =
+          `NodeID: ${data.source_workspace_nodeid || 'not configured'}`;
+        document.getElementById('scope-target-cloud').textContent =
+          data.target_workspace_nodeid ? `NodeID: ${data.target_workspace_nodeid}` : 'not configured';
         // Update DB badge
         const badgeDb = document.getElementById('badge-db');
         const txtDb = document.getElementById('txt-db');
@@ -1175,7 +1187,11 @@
         }
 
         if (res.ok && data.status === 'success') {
-          showToast("Discovery Complete", `Scanned ${data.nodes_count.toLocaleString()} nodes for ${data.workspace_title}.`, "success");
+          showToast(
+            "Discovery Complete",
+            `Scanned ${Number(data.total_nodes || 0).toLocaleString()} source objects.`,
+            "success"
+          );
           await fetchStatus();
           loadNodesTable();
         } else {
@@ -1493,14 +1509,17 @@
       setValue('pf-db-host', profile.db_host);
       setValue('pf-db-name', profile.db_name || 'cs');
       setValue('pf-db-user', profile.db_user);
+      setValue('pf-source-cs-url', profile.source_cs_url);
+      setValue('pf-source-cs-user', profile.source_cs_user);
       setValue('pf-ot-url', profile.ot_cloud_url);
       setValue('pf-ot-user', profile.ot_cloud_user);
       setValue('pf-category-map', JSON.stringify(profile.category_mappings || {}, null, 2));
       setValue('pf-workspace-map', JSON.stringify(profile.workspace_routes || {}, null, 2));
       setValue('pf-owner-map', JSON.stringify(profile.owner_mappings || {}, null, 2));
-      ['pf-db-password', 'pf-ot-password', 'pf-azure-sas-url'].forEach(id => setValue(id, ''));
+      ['pf-db-password', 'pf-source-cs-password', 'pf-ot-password', 'pf-azure-sas-url'].forEach(id => setValue(id, ''));
       const credentials = profile.credentials_configured || {};
       document.getElementById('pf-db-password').placeholder = credentials.db_password ? 'Saved — enter only to change' : 'Enter password';
+      document.getElementById('pf-source-cs-password').placeholder = credentials.source_cs_password ? 'Saved — enter only to change' : 'Enter password';
       document.getElementById('pf-ot-password').placeholder = credentials.ot_cloud_password ? 'Saved — enter only to change' : 'Enter password';
       const storageConfigured = credentials.azure_storage_sas_url || credentials.azure_storage_sas_token;
       document.getElementById('pf-azure-sas-url').placeholder = storageConfigured ?
@@ -1596,7 +1615,8 @@
           db_name: document.getElementById('pf-db-name').value.trim() || 'cs',
           db_user: document.getElementById('pf-db-user').value.trim(),
           sslmode: 'require',
-          binary_source_adapter: 'azure',
+          source_cs_url: document.getElementById('pf-source-cs-url').value.trim(),
+          source_cs_user: document.getElementById('pf-source-cs-user').value.trim(),
           ot_cloud_url: document.getElementById('pf-ot-url').value.trim(),
           ot_cloud_user: document.getElementById('pf-ot-user').value.trim(),
           verify_ssl: true,
@@ -1607,6 +1627,7 @@
         if (editingNewProfile) values.environment_class = 'test';
         const secrets = {
           db_password: document.getElementById('pf-db-password').value,
+          source_cs_password: document.getElementById('pf-source-cs-password').value,
           ot_cloud_password: document.getElementById('pf-ot-password').value,
           azure_storage_sas_url: document.getElementById('pf-azure-sas-url').value
         };
@@ -1620,9 +1641,15 @@
         currentEnv = data.active ? id : currentEnv;
         await loadProfiles();
         await fetchStatus();
+        document.getElementById('profile-discovery-result').classList.add('hidden');
+        closeModal('modal-profile');
         showToast('Setup Saved', 'Connections, mappings and supplied credentials were saved locally.', 'success');
         editingNewProfile = false;
       } catch (error) {
+        const result = document.getElementById('profile-discovery-result');
+        result.textContent = `Setup could not be saved: ${error.message}`;
+        result.classList.remove('hidden');
+        result.classList.add('text-rose-300', 'border-rose-900/60');
         showToast('Profile Error', error.message, 'error');
       }
     }

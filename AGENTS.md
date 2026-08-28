@@ -105,8 +105,10 @@ Keep ordinary Migration Setup small and understandable.
 - Source dates and owners are preserved.
 - Migrated content inherits the approved permissions of the selected GX39
   destination.
-- Azure source access is configured with one container-level SAS URL. The app
-  derives account URL, container, token and blob locator template.
+- Archive Center `acprimary` sources stream versions through the read-only
+  source Content Server REST API. A direct Azure source uses one container-level
+  SAS URL only when provider metadata exposes a real blob locator. `ixos://`
+  handles are not blob names and must never be formatted into Azure paths.
 - Passwords and tokens are intentionally persisted in local `config.json` for
   this controlled internal tool. The file must be mode `0600` where supported
   and excluded from release archives/version control.

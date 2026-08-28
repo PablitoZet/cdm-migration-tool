@@ -28,10 +28,15 @@ class InstanceLock:
 
     def _acquire(self) -> None:
         assert self._handle is not None
+        # msvcrt locks from the current file position, so every process must
+        # contend for the same byte even after the lock file contains a PID.
+        self._handle.seek(0)
         try:
             import fcntl
 
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(  # type: ignore[attr-defined]
+                self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+            )
         except ImportError:
             import msvcrt
 
@@ -49,8 +54,16 @@ class InstanceLock:
             try:
                 import fcntl
 
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            except (ImportError, OSError):
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+            except ImportError:
+                import msvcrt
+
+                try:
+                    self._handle.seek(0)
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+                except OSError:
+                    pass
+            except OSError:
                 pass
         finally:
             self._handle.close()

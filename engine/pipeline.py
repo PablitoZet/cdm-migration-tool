@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, BinaryIO
 
 from .client import OpenTextCloudClient
+from .config import EnvironmentConfig
 from .db import SourceDB
 from .manifest import ManifestStore, StateConflict
 from .models import (
@@ -110,9 +111,15 @@ class MigrationPipeline:
     def close(self) -> None:
         if self.is_running:
             raise StateConflict("Cannot close a pipeline while a run is active")
-        if self._target is not None and hasattr(self._target, "close"):
-            self._target.close()
-        self.manifest.close()
+        try:
+            if self._target is not None and hasattr(self._target, "close"):
+                self._target.close()
+        finally:
+            try:
+                if self._binary_source is not None and hasattr(self._binary_source, "close"):
+                    self._binary_source.close()
+            finally:
+                self.manifest.close()
 
     def log(self, message: str, level: str = "INFO") -> None:
         entry = {
@@ -185,11 +192,16 @@ class MigrationPipeline:
                     raise TerminalMigrationError(
                         "Production FULL run requires a confirmed source read-only freeze with an unchanged signature"
                     )
-            if run_mode != RunMode.DRY_RUN and self.env_cfg.get("ot_cloud_url"):
+            if run_mode == RunMode.DRY_RUN or self.env_cfg.get("ot_cloud_url"):
                 from .preflight import PreflightAuditor
 
+                preflight_env = (
+                    self.env_cfg
+                    if isinstance(self.env_cfg, EnvironmentConfig)
+                    else EnvironmentConfig(self.env_name, self.env_cfg)
+                )
                 report = PreflightAuditor(
-                    self.env_cfg, self.manifest, self.settings
+                    preflight_env, self.manifest, self.settings
                 ).run(online=False, for_mode=str(run_mode))
                 if report["status"] == "FAIL":
                     failed = [check["id"] for check in report["checks"] if check["status"] == "FAIL"]
@@ -528,17 +540,17 @@ class MigrationPipeline:
                 state=ItemState.UPLOADING, upload_key=upload_key, next_part=1, part_size=part_size,
             )
         offset = (next_part - 1) * part_size
+        if offset > version.size:
+            raise TerminalMigrationError("Multipart checkpoint exceeds the declared source size")
         digest = hashlib.sha256()
-        if offset:
-            with self.binary_source.open(version) as prefix:
-                remaining = offset
-                while remaining:
-                    chunk = prefix.read(min(8 * 1024 * 1024, remaining))
-                    if not chunk:
-                        raise TerminalMigrationError("Cannot reconstruct source hash before multipart checkpoint")
-                    digest.update(chunk)
-                    remaining -= len(chunk)
-        with self.binary_source.open(version, offset=offset) as stream:
+        with self.binary_source.open(version) as stream:
+            remaining = offset
+            while remaining:
+                chunk = stream.read(min(8 * 1024 * 1024, remaining))
+                if not chunk:
+                    raise TerminalMigrationError("Cannot reconstruct source hash before multipart checkpoint")
+                digest.update(chunk)
+                remaining -= len(chunk)
             part = next_part
             transferred = offset
             while transferred < version.size:
@@ -663,7 +675,17 @@ class MigrationPipeline:
     def _validate_version_manifest(self, version: SourceVersion) -> None:
         if version.size < 0:
             raise TerminalMigrationError("Negative version size")
-        if bool(self.settings.get("dry_run_require_blob_locator", True)) and not version.blob_locator:
+        adapter = str(self.env_cfg.get("binary_source_adapter", "azure")).lower()
+        if adapter == "content_server":
+            missing = [
+                key for key in ("source_cs_url", "source_cs_user", "source_cs_password")
+                if not self.env_cfg.get(key)
+            ]
+            if missing:
+                raise TerminalMigrationError(
+                    f"Missing source Content Server REST configuration: {', '.join(missing)}"
+                )
+        elif bool(self.settings.get("dry_run_require_blob_locator", True)) and not version.blob_locator:
             raise TerminalMigrationError(
                 f"Missing blob locator for {version.source_id} v{version.version_num}"
             )
@@ -683,7 +705,16 @@ class MigrationPipeline:
         safe = {
             "environment": self.env_name,
             "environment_class": self.env_cfg.get("environment_class"),
+            "db_host": self.env_cfg.get("db_host"),
+            "db_port": self.env_cfg.get("db_port"),
+            "db_name": self.env_cfg.get("db_name"),
+            "db_user": self.env_cfg.get("db_user"),
+            "db_sslmode": self.env_cfg.get("sslmode"),
             "source_root": self.env_cfg.get("source_workspace_nodeid"),
+            "binary_source_adapter": self.env_cfg.get("binary_source_adapter"),
+            "source_cs_url": self.env_cfg.get("source_cs_url"),
+            "azure_storage_account_url": self.env_cfg.get("azure_storage_account_url"),
+            "azure_blob_locator_template": self.env_cfg.get("azure_blob_locator_template"),
             "target_root": self.env_cfg.get("target_workspace_nodeid"),
             "cloud_url": self.env_cfg.get("ot_cloud_url"),
             "migration_namespace": self.env_cfg.get("migration_namespace"),

@@ -33,6 +33,11 @@ caches, virtual environments or previous releases.
 - corporate connectivity to source PostgreSQL and Azure Blob Storage;
 - outbound HTTPS to GX39 TEST/PROD.
 
+HTTPS clients use the native operating-system certificate store. On Windows,
+the approved corporate root and intermediate CAs must be installed in the
+Windows certificate store. A missing issuer is an environment/certificate-chain
+failure; never work around it by disabling TLS verification.
+
 If internet package installation is blocked, prepare dependencies through the
 corporate artifact process and install with:
 
@@ -61,6 +66,14 @@ The first launch:
 3. executes the unit tests;
 4. copies `config.example.json` to local `config.json`;
 5. starts the application on `127.0.0.1:8110`.
+
+Bootstrap fails closed if virtual-environment creation, dependency installation
+or unit tests return a non-zero exit code. Do not start the application or
+continue corporate qualification until that failure is diagnosed.
+
+Before configuration, the scope header must show both source and target as
+`not configured`. If it displays unexpected identifiers, stop and verify that
+the intended local `config.json` and profile state are active.
 
 The application does not require an API key. It must not be exposed on a network
 interface or reverse proxy.
@@ -99,9 +112,17 @@ to confirm the exact destination before any Pilot.
 
 ### Source document files
 
-Paste one complete Azure **container-level SAS URL** containing Read and List
-rights. A blob-specific URL is rejected. The application derives account URL,
-container, token and blob locator template and stores the URL locally.
+For Archive Center `acprimary` sources, enter the source Content Server REST URL
+and a read-only service account. The application streams
+`/api/v2/nodes/{DataID}/versions/{version}/content` and does not stage binaries.
+On multipart recovery it replays the completed prefix from byte zero to
+reconstruct SHA-256 and then continues the same source stream, so HTTP Range is
+not required for correctness. Include that replay cost in recovery timing.
+
+For a provider that exposes direct blob paths, paste one complete Azure
+**container-level SAS URL** containing Read and List rights. A blob-specific URL
+is rejected. Archive Center `ixos://` handles are not Azure blob names and must
+never be used as a path template.
 
 ### Local credential storage
 
@@ -115,6 +136,7 @@ requirement:
 
 ```text
 CDM_DB_PASSWORD_<PROFILE>
+CDM_SOURCE_CS_PASSWORD_<PROFILE>
 CDM_OT_PASSWORD_<PROFILE>
 CDM_AZURE_SAS_URL_<PROFILE>
 ```
@@ -169,8 +191,12 @@ owner or Business Workspace route.
 Click **2. Dry-Run Simulation**.
 
 Dry Run validates the complete manifest, hierarchy dependencies, supported
-types, mappings and binary locator presence. It makes no GX39 calls and writes
-no target mappings.
+types, mappings and binary source configuration. Direct Azure/file sources
+require a locator for every version; source Content Server REST resolves content
+by DataID and version. Dry Run makes no source-content or GX39 calls and writes
+no target mappings. Missing structural, category, owner or Business Workspace
+mapping prerequisites reject the Dry Run before a run record is created;
+post-Pilot operational acceptance is not required at this stage.
 
 Dry Run does not upload files and does not predict production throughput. Never
 use its duration to estimate the cutover window.
@@ -316,7 +342,8 @@ its WAL files.
 The following cannot be certified on a private machine:
 
 - real PostgreSQL schema/data access and exact source counts;
-- mapping from `DVersData.ProviderData` to the corporate Azure container;
+- mapping from `DVersData.ProviderID` through `ProviderData.ProviderData` to the
+  corporate Azure container;
 - GX39 multipart and subsequent-version dialect;
 - target category IDs and complex field payloads;
 - Business Workspace routes and roles;

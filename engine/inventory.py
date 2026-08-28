@@ -30,7 +30,8 @@ def source_signature(
     for row in sorted(versions, key=lambda item: (int(item["doc_source_id"]), int(item["version_num"]))):
         feed("V", (
             row["doc_source_id"], row["version_num"], row.get("file_name"), row.get("mime_type"),
-            int(row.get("data_size") or 0), row.get("provider_id"), row.get("provider_data"),
+            int(row.get("data_size") or 0), row.get("provider_id"), row.get("provider_type"),
+            row.get("provider_data"),
             row.get("ver_create_date", row.get("source_created_at")),
             row.get("ver_modify_date", row.get("source_modified_at")),
             row.get("version_comment", row.get("comment")),
@@ -59,7 +60,7 @@ def discovery_summary(
         subtype_counts[key] = subtype_counts.get(key, 0) + 1
     provider_counts: dict[str, int] = {}
     for version in versions:
-        key = str(version.get("provider_id"))
+        key = str(version.get("provider_type") or "unknown")
         provider_counts[key] = provider_counts.get(key, 0) + 1
     return {
         "root": nodes[0] if nodes else None,

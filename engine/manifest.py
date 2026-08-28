@@ -480,10 +480,11 @@ class ManifestStore:
 
         system_strategy = environment.get("system_attribute_strategy")
         owner_mappings = environment.get("owner_mappings", {}) or {}
-        system_ok = system_strategy == "preserve" and owner_ids <= set(owner_mappings)
+        missing_owners = sorted(owner_ids - set(owner_mappings))
+        system_ok = system_strategy == "preserve" and not missing_owners
         add(
             "SYSTEM_ATTRIBUTE_PARITY", system_ok,
-            f"strategy={system_strategy!r}, unmapped_owners={len(owner_ids - set(owner_mappings))}",
+            f"strategy={system_strategy!r}, unmapped_source_owner_ids={missing_owners[:20]}",
         )
 
         routes = environment.get("workspace_routes", {}) or {}
