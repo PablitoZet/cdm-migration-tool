@@ -29,6 +29,8 @@ require an API key. On first start, dependencies are installed and
 ## Read before operating or changing the tool
 
 - [`AGENTS.md`](AGENTS.md) — mandatory engineering and AI-agent rules.
+- [`CORPORATE_HANDOFF.md`](CORPORATE_HANDOFF.md) — current corporate-machine
+  checkpoint, first-test scope and agreed pre-production backlog.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — implemented architecture and invariants.
 - [`DEPLOYMENT_AND_QUALIFICATION.md`](DEPLOYMENT_AND_QUALIFICATION.md) — corporate
   installation, GX39 qualification and operator runbook.

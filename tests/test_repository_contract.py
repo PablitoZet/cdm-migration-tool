@@ -16,6 +16,7 @@ class RepositoryContractTests(unittest.TestCase):
         for name in (
             "README.md",
             "AGENTS.md",
+            "CORPORATE_HANDOFF.md",
             "ARCHITECTURE.md",
             "DEPLOYMENT_AND_QUALIFICATION.md",
             "MIGRATION_PLAN.md",

@@ -47,11 +47,13 @@ mandatory before a real upload or production cutover.
 Use documents in this order:
 
 1. `AGENTS.md` — engineering invariants and agent workflow.
-2. `ARCHITECTURE.md` — implemented component and state-machine design.
-3. `DEPLOYMENT_AND_QUALIFICATION.md` — installation, tenant qualification and
+2. `CORPORATE_HANDOFF.md` — current corporate-machine checkpoint, known
+   unknowns and agreed next work. It cannot override this file's invariants.
+3. `ARCHITECTURE.md` — implemented component and state-machine design.
+4. `DEPLOYMENT_AND_QUALIFICATION.md` — installation, tenant qualification and
    operator procedure.
-4. `MIGRATION_PLAN.md` — production scope, responsibilities and acceptance plan.
-5. Tests and current code — executable contract.
+5. `MIGRATION_PLAN.md` — production scope, responsibilities and acceptance plan.
+6. Tests and current code — executable contract.
 
 If documentation conflicts with code, stop and determine whether the code or
 the documentation is stale. Do not silently choose the easier interpretation.
