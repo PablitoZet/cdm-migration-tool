@@ -12,6 +12,7 @@ def source_signature(
     nodes: Sequence[dict[str, Any]],
     versions: Sequence[dict[str, Any]],
     categories: Sequence[dict[str, Any]],
+    owners: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     digest = hashlib.sha256()
 
@@ -34,6 +35,7 @@ def source_signature(
             row.get("provider_data"),
             row.get("ver_create_date", row.get("source_created_at")),
             row.get("ver_modify_date", row.get("source_modified_at")),
+            row.get("ver_file_date", row.get("source_file_date")),
             row.get("version_comment", row.get("comment")),
         ))
     for row in sorted(categories, key=lambda item: (
@@ -46,6 +48,17 @@ def source_signature(
             row.get("value", row.get("val_str")), row.get("val_long"), row.get("val_int"),
             row.get("val_real"), row.get("val_date"),
         ))
+    for row in sorted(owners or (), key=lambda item: int(item.get("source_owner_id", item.get("owner_id", 0)))):
+        feed("O", (
+            row.get("source_owner_id", row.get("owner_id")),
+            row.get("login"),
+            row.get("email"),
+            row.get("display_name"),
+            row.get("active"),
+            row.get("status_value"),
+            row.get("status_source"),
+            row.get("identity_status"),
+        ))
     return digest.hexdigest()
 
 
@@ -53,6 +66,7 @@ def discovery_summary(
     nodes: Sequence[dict[str, Any]],
     versions: Sequence[dict[str, Any]],
     categories: Sequence[dict[str, Any]],
+    owners: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     subtype_counts: dict[str, int] = {}
     for node in nodes:
@@ -81,6 +95,11 @@ def discovery_summary(
         "category_definitions": sorted({int(row["def_id"]) for row in categories}),
         "permission_ids": len({node.get("permissions_id") for node in nodes if node.get("permissions_id") is not None}),
         "owner_ids": len({node.get("owner_id") for node in nodes if node.get("owner_id") is not None}),
+        "owner_identities": len(owners or ()),
+        "owner_identity_statuses": {
+            str(status): sum(1 for owner in owners or () if str(owner.get("identity_status") or status) == status)
+            for status in sorted({str(owner.get("identity_status") or "UNKNOWN") for owner in owners or ()})
+        },
         "providers": provider_counts,
-        "signature": source_signature(nodes, versions, categories),
+        "signature": source_signature(nodes, versions, categories, owners),
     }

@@ -188,6 +188,29 @@ Do not continue while Readiness reports an unexplained failure. Populate mapping
 exception fields only when Readiness identifies the specific missing category,
 owner or Business Workspace route.
 
+Owner and provenance are configured as one-time prerequisites when Readiness
+requests them:
+
+- `Created By` is the GX39 migration service account; enter its exact login and,
+  when available, email for online identity read-back.
+- `Owned By` is resolved automatically once per distinct source KUAF owner.
+  The tool uses exact trimmed, case-insensitive login/email equality and never
+  accepts display names, filenames or same-name objects as identity evidence.
+- Do not create per-file or per-owner numeric mappings. An unresolved,
+  ambiguous, deactivated or status-unknown source owner blocks the run unless
+  the administrator provides one exact active fallback principal, such as
+  `CDM Legacy Owner`, and the operator approves the displayed exception digest
+  and change record at the run boundary.
+- The GX39 administrator must provide the dedicated `CDM Migration Provenance`
+  category ID and attribute keys. Its labels must explicitly identify
+  `Original Source` and `(Pre-Migration)` values for the source DataID, created
+  and modified dates, owner identity, source system and resolution status.
+  Documents additionally require ordered multi-row/set fields for every source
+  version number and source created/modified/file date.
+
+Original source dates and owner identity remain in provenance. GX39 system
+create/modify dates are target-generated and are not overwritten.
+
 ## 7. Dry Run
 
 Click **2. Dry-Run Simulation**.
@@ -198,7 +221,10 @@ require a locator for every version; source Content Server REST resolves content
 by DataID and version. Dry Run makes no source-content or GX39 calls and writes
 no target mappings. Missing structural, category, owner or Business Workspace
 mapping prerequisites reject the Dry Run before a run record is created;
-post-Pilot operational acceptance is not required at this stage.
+post-Pilot operational acceptance is not required at this stage. It also checks
+source owner identity completeness and deterministic provenance construction,
+but online GX39 member resolution and category compatibility remain required
+before a real run.
 
 Dry Run does not upload files and does not predict production throughput. Never
 use its duration to estimate the cutover window.
@@ -208,7 +234,7 @@ use its duration to estimate the cutover window.
 Before a representative Pilot or production approval, run controlled GX39 TEST
 cases for:
 
-1. an ordinary small document;
+1. an ordinary folder and an ordinary small document;
 2. a 49 MiB ordinary upload;
 3. the 50 MiB threshold boundary;
 4. at least one 100 MiB multipart document;
@@ -217,11 +243,19 @@ cases for:
 7. token expiration between multipart parts;
 8. a deliberately lost/ambiguous create response and duplicate reconciliation;
 9. first version and subsequent versions;
-10. version dates, comments and owners;
-11. categories, sets and multi-row attributes;
-12. every Business Workspace type/template route;
-13. destination ACL inheritance and role membership;
-14. Unicode, duplicate names, deep paths, shortcuts and URLs.
+10. exact owner lookup for login/email, service-account creator read-back and
+    `Owned By` assignment on ordinary folders/documents;
+11. `CDM Migration Provenance` applicability, date/time normalization and
+    read-back for ordinary objects;
+12. version dates, comments, owners and complete ordered provenance rows for
+    first and subsequent versions;
+13. categories, sets and multi-row attributes;
+14. every Business Workspace type/template route, owner assignment, provenance
+    applicability and role behavior;
+15. an approved unresolved/deactivated-owner fallback, including provenance of
+    the original owner and exact approval evidence;
+16. destination ACL inheritance and role membership;
+17. Unicode, duplicate names, deep paths, shortcuts and URLs.
 
 Capture sanitized HTTP schemas, GX39 correlation IDs, latency, 429/5xx rates and
 indexing delay. Never capture passwords, tickets, Authorization headers or SAS
@@ -232,8 +266,11 @@ a regression test and rerun the whole suite.
 
 ## 9. Representative Pilot
 
-After Dry Run and duplicate protection are ready, complete the pre-Pilot items
-under **Acceptance**, then run **3. Representative Pilot** against GX39 TEST.
+After Dry Run, duplicate protection and the owner/provenance qualification are
+ready, complete the pre-Pilot items under **Acceptance**, then run
+**3. Representative Pilot** against GX39 TEST. If the selected scope contains
+owner exceptions, the contextual approval must be supplied for that exact
+distinct-owner set; it is not a standing approval.
 
 Pilot selection is deterministic and risk-oriented: large files, deep paths,
 multiple versions, categories, providers, duplicate names, Unicode and
@@ -270,7 +307,9 @@ Before selecting **GX39 PROD cutover**, verify:
 - separate production credentials and duplicate-protection attribute;
 - successful GX39 TEST contract suite and representative Pilot;
 - Readiness PASS apart from the contextual source read-only confirmation;
-- category, owner and Business Workspace exception mappings approved;
+- `CDM Migration Provenance` category and attribute contract qualified;
+- exact owner resolution, active fallback policy and Business Workspace owner
+  routes qualified;
 - destination permissions and intended users approved;
 - active workflows/reservations resolved;
 - historical audit and personal UI exclusions accepted;
@@ -307,7 +346,10 @@ require:
 - every source version represented in order;
 - source/target SHA-256 equality for every version;
 - category value read-back;
-- date and owner read-back;
+- target `Created By` service-account read-back and `Owned By` exact
+  run-resolution read-back;
+- source dates, owner identity and resolution status read back from
+  `CDM Migration Provenance`, including every version row;
 - intended destination access and Business Workspace roles;
 - lifecycle operations, search/facets and legacy-link continuity;
 - business navigation and representative large-file access.
@@ -324,9 +366,11 @@ evidence according to corporate retention rules. Never include secrets.
 Recovery:
 
 - retains verified items and mappings;
+- retains the immutable per-run owner resolutions and any fallback approval;
 - retains multipart upload checkpoints;
 - retries incomplete/eligible failed work;
 - rejects a changed profile fingerprint;
+- rechecks that resolved target members remain active and identity-consistent;
 - requires a valid source freeze for production;
 - never deletes target content.
 
@@ -347,8 +391,9 @@ The following cannot be certified on a private machine:
 - mapping from `DVersData.ProviderID` through `ProviderData.ProviderData` to the
   corporate Azure container;
 - GX39 multipart and subsequent-version dialect;
-- target category IDs and complex field payloads;
-- Business Workspace routes and roles;
+- target provenance category IDs, date/set/multi-row payloads and read-back;
+- ordinary and Business Workspace owner-assignment routes;
+- Business Workspace creation routes and roles;
 - service-account privileges and ACL inheritance;
 - token lifetime, rate limits, WAF behavior and indexing delay;
 - end-to-end throughput and cutover duration.
@@ -356,7 +401,10 @@ The following cannot be certified on a private machine:
 The first GX39 DEV Pilot showed that standard node create/update forms expose
 `create_date`, `modify_date` and `owner_user_id` as readonly. Create forms allow
 `external_create_date` and `external_modify_date`, but those are not silently
-accepted as system-date fidelity. A supported OpenText import/bulk contract or
-explicitly approved fidelity design is required before another real run.
+accepted as system-date fidelity. The implemented replacement contract keeps
+GX39 system dates target-generated, assigns `Owned By` from exact active target
+identity evidence, keeps `Created By` as the migration account, and records
+original dates/owner in `CDM Migration Provenance`. That replacement contract
+still requires the qualification matrix above before another real run.
 
 Treat each unknown as a blocker until corporate TEST evidence exists.

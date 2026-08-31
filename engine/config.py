@@ -19,6 +19,11 @@ SECRET_KEYS = {
     "azure_storage_sas_token": "CDM_AZURE_SAS_TOKEN",
     "azure_storage_sas_url": "CDM_AZURE_SAS_URL",
 }
+HIDDEN_COMPATIBILITY_KEYS = frozenset({
+    "system_attribute_strategy",
+    "system_attribute_field_map",
+    "owner_mappings",
+})
 PROFILE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,47}$")
 ENVIRONMENT_CLASSES = frozenset({"sandbox", "test", "production"})
 
@@ -37,6 +42,35 @@ def normalize_profile_values(profile_id: str, raw: dict[str, Any]) -> dict[str, 
     values["migration_namespace"] = str(
         values.get("migration_namespace") or f"cdm-{profile_id}"
     )
+    provenance_category = values.get("provenance_category_id")
+    if provenance_category not in (None, ""):
+        try:
+            provenance_category = int(str(provenance_category))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError("Provenance category ID must be a positive integer") from exc
+        if provenance_category <= 0:
+            raise ConfigurationError("Provenance category ID must be a positive integer")
+        values["provenance_category_id"] = provenance_category
+    else:
+        values["provenance_category_id"] = None
+    for key in ("provenance_attribute_keys", "provenance_version_attribute_keys"):
+        configured = values.get(key, {})
+        if configured is None:
+            values[key] = {}
+        elif not isinstance(configured, dict):
+            raise ConfigurationError(f"{key} must be a JSON object")
+        else:
+            values[key] = {
+                str(field): value for field, value in configured.items()
+                if value not in (None, "")
+            }
+    fallback = values.get("owner_fallback", {})
+    if fallback is None:
+        values["owner_fallback"] = {}
+    elif not isinstance(fallback, dict):
+        raise ConfigurationError("owner_fallback must be a JSON object")
+    else:
+        values["owner_fallback"] = dict(fallback)
 
     marker_key = str(values.get("migration_attribute_key") or "").strip()
     if marker_key:
@@ -120,6 +154,7 @@ class EnvironmentConfig:
         return {
             key: ("<configured>" if key in SECRET_KEYS and value else "<missing>" if key in SECRET_KEYS else value)
             for key, value in self.values.items()
+            if key not in HIDDEN_COMPATIBILITY_KEYS
         }
 
     @property

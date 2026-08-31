@@ -14,8 +14,17 @@ from typing import Any
 from .instance_lock import InstanceLock
 from .inventory import source_signature
 from .models import ItemState, RunMode, RunStatus, SourceNode, SourceVersion
+from .provenance import (
+    METADATA_CONTRACT_VERSION,
+    NODE_PROVENANCE_FIELDS,
+    VERSION_PROVENANCE_FIELDS,
+    OwnerIdentity,
+    OwnerResolution,
+    owner_identity_from_row,
+    owner_resolution_from_row,
+)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utcnow() -> str:
@@ -111,9 +120,23 @@ class ManifestStore:
                     source_sha256 TEXT,
                     source_created_at TEXT,
                     source_modified_at TEXT,
+                    source_file_date TEXT,
                     source_comment TEXT,
                     PRIMARY KEY(doc_source_id, version_num),
                     FOREIGN KEY(doc_source_id) REFERENCES manifest_nodes(source_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS manifest_owners (
+                    source_owner_id INTEGER PRIMARY KEY,
+                    login TEXT,
+                    email TEXT,
+                    display_name TEXT,
+                    active INTEGER,
+                    status_value TEXT,
+                    status_source TEXT,
+                    identity_status TEXT NOT NULL,
+                    identity_fingerprint TEXT NOT NULL,
+                    extracted_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS manifest_categories (
@@ -141,7 +164,11 @@ class ManifestStore:
                     completed_at TEXT,
                     created_at TEXT NOT NULL,
                     stop_requested INTEGER NOT NULL DEFAULT 0,
-                    notes TEXT
+                    notes TEXT,
+                    metadata_contract_version TEXT NOT NULL DEFAULT 'legacy-system-attributes',
+                    service_member_id INTEGER,
+                    service_login TEXT,
+                    service_email TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS run_items (
@@ -158,6 +185,7 @@ class ManifestStore:
                     last_error_code TEXT,
                     last_error TEXT,
                     bytes_transferred INTEGER NOT NULL DEFAULT 0,
+                    metadata_contract_version TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(run_id, source_id),
                     FOREIGN KEY(run_id) REFERENCES migration_runs(run_id) ON DELETE CASCADE,
@@ -190,6 +218,7 @@ class ManifestStore:
                     subtype INTEGER NOT NULL,
                     migration_id TEXT NOT NULL UNIQUE,
                     verified INTEGER NOT NULL DEFAULT 0,
+                    metadata_contract_version TEXT NOT NULL DEFAULT 'legacy-system-attributes',
                     mapped_at TEXT NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES migration_runs(run_id)
                 );
@@ -205,6 +234,43 @@ class ManifestStore:
                     correlation_id TEXT,
                     detail TEXT,
                     created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES migration_runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS run_owner_resolutions (
+                    run_id TEXT NOT NULL,
+                    source_owner_id INTEGER NOT NULL,
+                    source_identity_fingerprint TEXT NOT NULL,
+                    source_login TEXT,
+                    source_email TEXT,
+                    source_display_name TEXT,
+                    source_active INTEGER,
+                    source_status_value TEXT,
+                    source_status_source TEXT,
+                    source_identity_status TEXT NOT NULL,
+                    target_member_id INTEGER,
+                    resolution_status TEXT NOT NULL,
+                    reason TEXT,
+                    target_login TEXT,
+                    target_email TEXT,
+                    target_display_name TEXT,
+                    target_active INTEGER,
+                    resolved_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, source_owner_id),
+                    FOREIGN KEY(run_id) REFERENCES migration_runs(run_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS run_fallback_approvals (
+                    run_id TEXT PRIMARY KEY,
+                    fallback_member_id INTEGER NOT NULL,
+                    fallback_login TEXT,
+                    fallback_email TEXT,
+                    fallback_display_name TEXT,
+                    exception_set_digest TEXT NOT NULL,
+                    exception_count INTEGER NOT NULL,
+                    operator TEXT NOT NULL,
+                    change_record TEXT NOT NULL,
+                    approved_at TEXT NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES migration_runs(run_id) ON DELETE CASCADE
                 );
 
@@ -225,6 +291,39 @@ class ManifestStore:
             }
             if "source_comment" not in columns:
                 conn.execute("ALTER TABLE manifest_versions ADD COLUMN source_comment TEXT")
+            if "source_file_date" not in columns:
+                conn.execute("ALTER TABLE manifest_versions ADD COLUMN source_file_date TEXT")
+            run_columns = {
+                str(row["name"]).lower()
+                for row in conn.execute("PRAGMA table_info(migration_runs)")
+            }
+            if "metadata_contract_version" not in run_columns:
+                conn.execute(
+                    "ALTER TABLE migration_runs ADD COLUMN metadata_contract_version TEXT "
+                    "NOT NULL DEFAULT 'legacy-system-attributes'"
+                )
+            for column, definition in (
+                ("service_member_id", "INTEGER"),
+                ("service_login", "TEXT"),
+                ("service_email", "TEXT"),
+            ):
+                if column not in run_columns:
+                    conn.execute(f"ALTER TABLE migration_runs ADD COLUMN {column} {definition}")
+            item_columns = {
+                str(row["name"]).lower()
+                for row in conn.execute("PRAGMA table_info(run_items)")
+            }
+            if "metadata_contract_version" not in item_columns:
+                conn.execute("ALTER TABLE run_items ADD COLUMN metadata_contract_version TEXT")
+            mapping_columns = {
+                str(row["name"]).lower()
+                for row in conn.execute("PRAGMA table_info(id_mapping)")
+            }
+            if "metadata_contract_version" not in mapping_columns:
+                conn.execute(
+                    "ALTER TABLE id_mapping ADD COLUMN metadata_contract_version TEXT "
+                    "NOT NULL DEFAULT 'legacy-system-attributes'"
+                )
         with suppress(OSError):
             Path(self.db_path).chmod(0o600)
 
@@ -239,6 +338,7 @@ class ManifestStore:
             conn.execute("DELETE FROM id_mapping")
             conn.execute("DELETE FROM migration_runs")
             conn.execute("DELETE FROM manifest_nodes")
+            conn.execute("DELETE FROM manifest_owners")
             conn.execute("DELETE FROM schema_meta WHERE key<>'schema_version'")
 
     def import_extracted_data(
@@ -252,9 +352,10 @@ class ManifestStore:
         signature: str | None = None,
         source_root_id: int | None = None,
         source_profile_id: str | None = None,
+        owners: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         now = extracted_at or utcnow()
-        signature = signature or source_signature(nodes, versions, categories)
+        signature = signature or source_signature(nodes, versions, categories, owners)
         with self.transaction(immediate=True) as conn:
             for node in nodes:
                 conn.execute(
@@ -286,13 +387,14 @@ class ManifestStore:
                     """
                     INSERT INTO manifest_versions(
                         doc_source_id,version_num,file_name,mime_type,data_size,provider_id,provider_data,
-                        blob_locator,source_sha256,source_created_at,source_modified_at,source_comment
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                        blob_locator,source_sha256,source_created_at,source_modified_at,source_file_date,source_comment
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(doc_source_id,version_num) DO UPDATE SET
                         file_name=excluded.file_name,mime_type=excluded.mime_type,data_size=excluded.data_size,
                         provider_id=excluded.provider_id,provider_data=excluded.provider_data,
                         blob_locator=excluded.blob_locator,source_created_at=excluded.source_created_at,
-                        source_modified_at=excluded.source_modified_at,source_comment=excluded.source_comment
+                        source_modified_at=excluded.source_modified_at,source_file_date=excluded.source_file_date,
+                        source_comment=excluded.source_comment
                     """,
                     (
                         version["doc_source_id"], version["version_num"], version.get("file_name") or "content.bin",
@@ -301,7 +403,28 @@ class ManifestStore:
                         version.get("source_sha256"),
                         _iso(version.get("ver_create_date", version.get("source_created_at"))),
                         _iso(version.get("ver_modify_date", version.get("source_modified_at"))),
+                        _iso(version.get("ver_file_date", version.get("source_file_date"))),
                         version.get("version_comment", version.get("comment")),
+                    ),
+                )
+            for owner in owners or ():
+                identity = owner_identity_from_row(owner)
+                conn.execute(
+                    """
+                    INSERT INTO manifest_owners(
+                        source_owner_id,login,email,display_name,active,status_value,status_source,
+                        identity_status,identity_fingerprint,extracted_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(source_owner_id) DO UPDATE SET
+                        login=excluded.login,email=excluded.email,display_name=excluded.display_name,
+                        active=excluded.active,status_value=excluded.status_value,
+                        status_source=excluded.status_source,identity_status=excluded.identity_status,
+                        identity_fingerprint=excluded.identity_fingerprint,extracted_at=excluded.extracted_at
+                    """,
+                    (
+                        identity.source_owner_id, identity.login, identity.email, identity.display_name,
+                        None if identity.active is None else int(identity.active), identity.status_value,
+                        identity.status_source, identity.identity_status, identity.fingerprint, now,
                     ),
                 )
             for category in categories:
@@ -388,59 +511,92 @@ class ManifestStore:
             "note": metadata.get("freeze_note"),
         }
 
-    def parity_report(self, environment: Any, *, include_qualification: bool = True) -> dict[str, Any]:
+    def parity_report(
+        self,
+        environment: Any,
+        *,
+        include_qualification: bool = True,
+        max_documents: int | None = None,
+    ) -> dict[str, Any]:
         """Describe whether the extracted scope can be recreated functionally 1:1."""
         with self.connection() as conn:
-            total_nodes = int(conn.execute("SELECT COUNT(*) FROM manifest_nodes").fetchone()[0])
+            scope_ids = self._selected_nodes(conn, max_documents)
+            node_scope, node_params = self._scope_clause(scope_ids, "source_id")
+            version_scope, version_params = self._scope_clause(scope_ids, "doc_source_id")
+            category_scope, category_params = self._scope_clause(scope_ids, "source_id")
+            total_nodes = int(conn.execute(
+                f"SELECT COUNT(*) FROM manifest_nodes WHERE 1=1{node_scope}", node_params
+            ).fetchone()[0])
+            total_versions = int(conn.execute(
+                f"SELECT COUNT(*) FROM manifest_versions WHERE 1=1{version_scope}", version_params
+            ).fetchone()[0])
             unsupported = conn.execute(
                 "SELECT subtype,COUNT(*) n FROM manifest_nodes "
-                "WHERE subtype NOT IN (0,1,136,140,144,154,202,298,751,848) GROUP BY subtype"
+                f"WHERE subtype NOT IN (0,1,136,140,144,154,202,298,751,848){node_scope} "
+                "GROUP BY subtype", node_params
             ).fetchall()
             unmapped_categories = conn.execute(
                 "SELECT COUNT(*) FROM manifest_categories "
-                "WHERE target_category_id IS NULL OR target_attr_key IS NULL OR target_attr_key=''"
+                f"WHERE (target_category_id IS NULL OR target_attr_key IS NULL OR target_attr_key=''){category_scope}",
+                category_params,
             ).fetchone()[0]
             duplicate_target_keys = conn.execute(
-                """SELECT COUNT(*) FROM (
+                f"""SELECT COUNT(*) FROM (
                      SELECT source_id,target_category_id,target_attr_key,COUNT(*) n
                      FROM manifest_categories
-                     WHERE target_category_id IS NOT NULL AND target_attr_key IS NOT NULL
+                     WHERE target_category_id IS NOT NULL AND target_attr_key IS NOT NULL{category_scope}
                      GROUP BY source_id,target_category_id,target_attr_key HAVING COUNT(*)>1
-                   )"""
+                   )""",
+                category_params,
             ).fetchone()[0]
             missing_references = conn.execute(
-                """SELECT COUNT(*) FROM manifest_nodes
+                f"""SELECT COUNT(*) FROM manifest_nodes
                    WHERE (subtype=1 AND json_extract(extra_json,'$.reference_source_id') IS NULL)
-                      OR (subtype=140 AND COALESCE(json_extract(extra_json,'$.url'),'')='')"""
+                     OR (subtype=140 AND COALESCE(json_extract(extra_json,'$.url'),'')=''){node_scope}""",
+                node_params,
             ).fetchone()[0]
+            reference_scope, reference_params = self._scope_clause(scope_ids, "ref.source_id")
+            target_scope, target_params = self._scope_clause(scope_ids, "target.source_id")
             external_references = conn.execute(
-                """SELECT COUNT(*) FROM manifest_nodes ref
-                   WHERE ref.subtype=1
+                f"""SELECT COUNT(*) FROM manifest_nodes ref
+                   WHERE ref.subtype=1{reference_scope}
                      AND NOT EXISTS(
                        SELECT 1 FROM manifest_nodes target
                        WHERE target.source_id=CAST(json_extract(ref.extra_json,'$.reference_source_id') AS INTEGER)
-                     )"""
+                         {target_scope}
+                     )""",
+                reference_params + target_params,
             ).fetchone()[0]
             active_reservations = conn.execute(
-                """SELECT COUNT(*) FROM manifest_nodes
+                f"""SELECT COUNT(*) FROM manifest_nodes
                    WHERE json_extract(extra_json,'$.reserved_by') IS NOT NULL
-                     AND CAST(json_extract(extra_json,'$.reserved_by') AS TEXT) NOT IN ('0','false','')"""
+                     AND CAST(json_extract(extra_json,'$.reserved_by') AS TEXT) NOT IN ('0','false',''){node_scope}""",
+                node_params,
             ).fetchone()[0]
             version_comments = conn.execute(
-                "SELECT COUNT(*) FROM manifest_versions WHERE COALESCE(source_comment,'')<>''"
+                f"SELECT COUNT(*) FROM manifest_versions "
+                f"WHERE COALESCE(source_comment,'')<>''{version_scope}",
+                version_params,
             ).fetchone()[0]
             permission_ids = {
                 str(row[0]) for row in conn.execute(
-                    "SELECT DISTINCT permissions_id FROM manifest_nodes WHERE permissions_id IS NOT NULL"
+                    f"SELECT DISTINCT permissions_id FROM manifest_nodes "
+                    f"WHERE permissions_id IS NOT NULL{node_scope}", node_params
                 )
             }
             owner_ids = {
                 str(row[0]) for row in conn.execute(
-                    "SELECT DISTINCT owner_id FROM manifest_nodes WHERE owner_id IS NOT NULL"
+                    f"SELECT DISTINCT owner_id FROM manifest_nodes "
+                    f"WHERE owner_id IS NOT NULL{node_scope}", node_params
                 )
             }
+            missing_owner_nodes = int(conn.execute(
+                f"SELECT COUNT(*) FROM manifest_nodes "
+                f"WHERE owner_id IS NULL{node_scope}", node_params
+            ).fetchone()[0])
             workspaces = [dict(row) for row in conn.execute(
-                "SELECT source_id,type_name,depth FROM manifest_nodes WHERE subtype=848"
+                f"SELECT source_id,type_name,depth FROM manifest_nodes "
+                f"WHERE subtype=848{node_scope}", node_params
             )]
         checks: list[dict[str, Any]] = []
 
@@ -478,13 +634,52 @@ class ManifestStore:
             f"target_acl_approved={bool(environment.get('target_acl_approved'))}",
         )
 
-        system_strategy = environment.get("system_attribute_strategy")
-        owner_mappings = environment.get("owner_mappings", {}) or {}
-        missing_owners = sorted(owner_ids - set(owner_mappings))
-        system_ok = system_strategy == "preserve" and not missing_owners
+        manifest_owners = {
+            str(owner.source_owner_id): owner for owner in self.owner_identities()
+        }
+        missing_owner_rows = sorted(owner_ids - set(manifest_owners))
+        incomplete_owner_rows = sorted(
+            source_id for source_id, owner in manifest_owners.items()
+            if source_id in owner_ids and (
+                owner.identity_status in {"UNKNOWN", "STATUS_UNKNOWN", "AMBIGUOUS", "UNRESOLVED"}
+                or owner.active is None
+            )
+        )
         add(
-            "SYSTEM_ATTRIBUTE_PARITY", system_ok,
-            f"strategy={system_strategy!r}, unmapped_source_owner_ids={missing_owners[:20]}",
+            "OWNER_IDENTITY_PARITY",
+            not missing_owner_rows and not incomplete_owner_rows and missing_owner_nodes == 0,
+            f"missing_owner_rows={missing_owner_rows[:20]}, "
+            f"incomplete_owner_rows={incomplete_owner_rows[:20]}, "
+            f"nodes_without_owner_id={missing_owner_nodes}; "
+            "Owned By uses immutable exact source-owner resolutions.",
+        )
+        provenance_category = environment.get("provenance_category_id")
+        provenance_keys = environment.get("provenance_attribute_keys", {}) or {}
+        version_keys = environment.get("provenance_version_attribute_keys", {}) or {}
+        missing_node_fields = [
+            field for field in NODE_PROVENANCE_FIELDS if not provenance_keys.get(field)
+        ]
+        missing_version_fields = [
+            field for field in VERSION_PROVENANCE_FIELDS if not version_keys.get(field)
+        ]
+        provenance_ok = bool(
+            provenance_category and not missing_node_fields and (
+                not total_versions or not missing_version_fields
+            )
+        )
+        add(
+            "PROVENANCE_PARITY",
+            provenance_ok,
+            f"category_id={'configured' if provenance_category else 'missing'}, "
+            f"missing_node_fields={missing_node_fields}, "
+            f"missing_version_fields={missing_version_fields}; "
+            "source dates and owner identity are stored as pre-migration provenance.",
+        )
+        add(
+            "CREATOR_PARITY",
+            bool(environment.get("creator_readback_qualified")),
+            "Created By remains the migration service account and requires target read-back.",
+            qualification=True,
         )
 
         routes = environment.get("workspace_routes", {}) or {}
@@ -574,6 +769,10 @@ class ManifestStore:
         max_documents: int | None = None,
         config_fingerprint: str | None = None,
         source_snapshot: str | None = None,
+        metadata_contract_version: str = METADATA_CONTRACT_VERSION,
+        owner_resolutions: Sequence[OwnerResolution | dict[str, Any]] | None = None,
+        fallback_approval: dict[str, Any] | None = None,
+        service_identity: dict[str, Any] | None = None,
     ) -> str:
         mode = RunMode(mode)
         run_id = str(uuid.uuid4())
@@ -590,46 +789,38 @@ class ManifestStore:
                 raise StateConflict("Manifest is empty")
             conn.execute(
                 """INSERT INTO migration_runs(
-                    run_id,environment,mode,root_node_id,status,config_fingerprint,source_snapshot,created_at
-                ) VALUES(?,?,?,?,?,?,?,?)""",
-                (run_id, environment, mode, root_node_id, RunStatus.CREATED, config_fingerprint, source_snapshot, now),
+                    run_id,environment,mode,root_node_id,status,config_fingerprint,source_snapshot,created_at,
+                    metadata_contract_version,service_member_id,service_login,service_email
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    run_id, environment, mode, root_node_id, RunStatus.CREATED, config_fingerprint,
+                    source_snapshot, now, metadata_contract_version,
+                    service_identity.get("id") if service_identity else None,
+                    service_identity.get("login") if service_identity else None,
+                    service_identity.get("email") if service_identity else None,
+                ),
             )
-            selected_nodes: set[int] | None = None
-            if max_documents:
-                selected_docs = self._representative_pilot_documents(conn, max_documents)
-                selected_nodes = set(selected_docs)
-                selected_nodes.update(
-                    int(row[0]) for row in conn.execute(
-                        "SELECT source_id FROM manifest_nodes WHERE subtype IN (1,140) "
-                        "ORDER BY subtype,source_id LIMIT 20"
-                    )
-                )
-                for row in conn.execute(
-                    "SELECT source_id,extra_json FROM manifest_nodes WHERE source_id IN "
-                    "(SELECT source_id FROM manifest_nodes WHERE subtype=1 ORDER BY source_id LIMIT 20)"
-                ):
-                    referenced = json.loads(row["extra_json"]).get("reference_source_id")
-                    if referenced is not None:
-                        selected_nodes.add(int(referenced))
-                parents = {
-                    parent_row["source_id"]: parent_row["parent_source_id"]
-                    for parent_row in conn.execute("SELECT source_id,parent_source_id FROM manifest_nodes")
-                }
-                for source_id in tuple(selected_nodes):
-                    parent_id = parents.get(source_id)
-                    while parent_id is not None and parent_id in parents and parent_id not in selected_nodes:
-                        selected_nodes.add(parent_id)
-                        parent_id = parents.get(parent_id)
+            selected_nodes = self._selected_nodes(conn, max_documents)
             for row in conn.execute("SELECT source_id,subtype FROM manifest_nodes ORDER BY depth,source_id"):
                 phase = _phase_for_subtype(row["subtype"])
                 if selected_nodes is not None and row["source_id"] not in selected_nodes:
                     continue
-                existing = conn.execute("SELECT target_id,verified FROM id_mapping WHERE source_id=?", (row["source_id"],)).fetchone()
-                state = ItemState.VERIFIED if existing and existing["verified"] else ItemState.READY
+                existing = conn.execute(
+                    "SELECT target_id,verified,metadata_contract_version FROM id_mapping WHERE source_id=?",
+                    (row["source_id"],),
+                ).fetchone()
+                state = (
+                    ItemState.VERIFIED
+                    if existing and existing["verified"]
+                    and existing["metadata_contract_version"] == metadata_contract_version
+                    else ItemState.READY
+                )
                 target_id = existing["target_id"] if existing else None
                 conn.execute(
-                    "INSERT INTO run_items(run_id,source_id,phase,state,target_id,updated_at) VALUES(?,?,?,?,?,?)",
-                    (run_id, row["source_id"], phase, state, target_id, now),
+                    """INSERT INTO run_items(
+                        run_id,source_id,phase,state,target_id,metadata_contract_version,updated_at
+                    ) VALUES(?,?,?,?,?,?,?)""",
+                    (run_id, row["source_id"], phase, state, target_id, metadata_contract_version, now),
                 )
                 if phase == "DOCUMENT":
                     for version in conn.execute(
@@ -642,7 +833,190 @@ class ManifestStore:
                             ) VALUES(?,?,?,?,?,?)""",
                             (run_id, row["source_id"], version["version_num"], state, version["source_sha256"], now),
                         )
+            resolution_rows = {
+                int(
+                    resolution.source_owner_id
+                    if isinstance(resolution, OwnerResolution)
+                    else resolution["source_owner_id"]
+                ): (
+                    resolution
+                    if isinstance(resolution, OwnerResolution)
+                    else owner_resolution_from_row(resolution)
+                )
+                for resolution in owner_resolutions or ()
+            }
+            owner_query = (
+                "SELECT DISTINCT n.owner_id FROM manifest_nodes n "
+                "JOIN run_items i ON i.source_id=n.source_id AND i.run_id=? "
+                "WHERE n.owner_id IS NOT NULL"
+                if selected_nodes is not None
+                else "SELECT DISTINCT owner_id FROM manifest_nodes WHERE owner_id IS NOT NULL"
+            )
+            owner_params = (run_id,) if selected_nodes is not None else ()
+            required_owner_ids = {
+                int(row[0]) for row in conn.execute(owner_query, owner_params)
+            }
+            if (
+                mode != RunMode.DRY_RUN
+                and metadata_contract_version == METADATA_CONTRACT_VERSION
+                and required_owner_ids - set(resolution_rows)
+            ):
+                missing = sorted(required_owner_ids - set(resolution_rows))
+                raise StateConflict(f"Run owner resolutions are incomplete: {missing[:20]}")
+            for owner_id in sorted(resolution_rows):
+                resolution = resolution_rows[owner_id]
+                source = conn.execute(
+                    "SELECT * FROM manifest_owners WHERE source_owner_id=?", (owner_id,)
+                ).fetchone()
+                if not source:
+                    raise StateConflict(f"Missing manifest identity for source owner {owner_id}")
+                if str(source["identity_fingerprint"]) != resolution.source_identity_fingerprint:
+                    raise StateConflict(f"Source owner identity changed for {owner_id}")
+                conn.execute(
+                    """INSERT INTO run_owner_resolutions(
+                        run_id,source_owner_id,source_identity_fingerprint,source_login,source_email,
+                        source_display_name,source_active,source_status_value,source_status_source,
+                        source_identity_status,target_member_id,resolution_status,reason,target_login,
+                        target_email,target_display_name,target_active,resolved_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        run_id, owner_id, resolution.source_identity_fingerprint,
+                        source["login"], source["email"], source["display_name"], source["active"],
+                        source["status_value"], source["status_source"], source["identity_status"],
+                        resolution.target_member_id, resolution.resolution_status, resolution.reason,
+                        resolution.target_login, resolution.target_email, resolution.target_display_name,
+                        None if resolution.target_active is None else int(resolution.target_active),
+                        resolution.resolved_at or now,
+                    ),
+                )
+            if fallback_approval is not None:
+                conn.execute(
+                    """INSERT INTO run_fallback_approvals(
+                        run_id,fallback_member_id,fallback_login,fallback_email,fallback_display_name,
+                        exception_set_digest,exception_count,operator,change_record,approved_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        run_id, int(fallback_approval["fallback_member_id"]),
+                        fallback_approval.get("fallback_login"), fallback_approval.get("fallback_email"),
+                        fallback_approval.get("fallback_display_name"),
+                        str(fallback_approval["exception_set_digest"]),
+                        int(fallback_approval.get("exception_count") or 0),
+                        str(fallback_approval["operator"]).strip(),
+                        str(fallback_approval.get("change_record") or "").strip(),
+                        str(fallback_approval.get("approved_at") or now),
+                    ),
+                )
         return run_id
+
+    def owner_ids_for_scope(self, max_documents: int | None = None) -> set[int]:
+        """Return distinct source owners represented by the exact run scope."""
+        scope_ids = self.source_ids_for_scope(max_documents)
+        with self.connection() as conn:
+            if scope_ids is None:
+                rows = conn.execute(
+                    "SELECT DISTINCT owner_id FROM manifest_nodes WHERE owner_id IS NOT NULL"
+                ).fetchall()
+            else:
+                scope, params = self._scope_clause(scope_ids, "source_id")
+                rows = conn.execute(
+                    f"SELECT DISTINCT owner_id FROM manifest_nodes "
+                    f"WHERE owner_id IS NOT NULL{scope}", params
+                ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def source_ids_for_scope(self, max_documents: int | None = None) -> set[int] | None:
+        """Return the exact source node scope, or None when the full manifest is selected."""
+        with self.connection() as conn:
+            selected_nodes = self._selected_nodes(conn, max_documents)
+            if selected_nodes is None:
+                rows = conn.execute(
+                    "SELECT source_id FROM manifest_nodes"
+                ).fetchall()
+            else:
+                return set(selected_nodes)
+        return {int(row[0]) for row in rows}
+
+    @staticmethod
+    def _scope_clause(scope_ids: set[int] | None, column: str) -> tuple[str, tuple[int, ...]]:
+        if scope_ids is None:
+            return "", ()
+        if not scope_ids:
+            return " AND 1=0", ()
+        values = tuple(sorted(scope_ids))
+        placeholders = ",".join("?" for _ in values)
+        return f" AND {column} IN ({placeholders})", values
+
+    def owner_identities(self) -> list[OwnerIdentity]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM manifest_owners ORDER BY source_owner_id"
+            ).fetchall()
+        return [owner_identity_from_row(dict(row)) for row in rows]
+
+    def owner_identity(self, source_owner_id: int) -> OwnerIdentity:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM manifest_owners WHERE source_owner_id=?", (source_owner_id,)
+            ).fetchone()
+        if not row:
+            raise KeyError(source_owner_id)
+        return owner_identity_from_row(dict(row))
+
+    def run_owner_resolutions(self, run_id: str) -> list[OwnerResolution]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM run_owner_resolutions WHERE run_id=? ORDER BY source_owner_id",
+                (run_id,),
+            ).fetchall()
+        return [owner_resolution_from_row(dict(row)) for row in rows]
+
+    def run_owner_resolution(self, run_id: str, source_owner_id: int) -> OwnerResolution:
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT * FROM run_owner_resolutions
+                   WHERE run_id=? AND source_owner_id=?""",
+                (run_id, source_owner_id),
+            ).fetchone()
+        if not row:
+            raise KeyError((run_id, source_owner_id))
+        return owner_resolution_from_row(dict(row))
+
+    def fallback_approval(self, run_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_fallback_approvals WHERE run_id=?", (run_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _selected_nodes(
+        self, conn: sqlite3.Connection, max_documents: int | None,
+    ) -> set[int] | None:
+        if not max_documents:
+            return None
+        selected_nodes = set(self._representative_pilot_documents(conn, max_documents))
+        selected_nodes.update(
+            int(row[0]) for row in conn.execute(
+                "SELECT source_id FROM manifest_nodes WHERE subtype IN (1,140) "
+                "ORDER BY subtype,source_id LIMIT 20"
+            )
+        )
+        for row in conn.execute(
+            "SELECT source_id,extra_json FROM manifest_nodes WHERE source_id IN "
+            "(SELECT source_id FROM manifest_nodes WHERE subtype=1 ORDER BY source_id LIMIT 20)"
+        ):
+            referenced = json.loads(row["extra_json"]).get("reference_source_id")
+            if referenced is not None:
+                selected_nodes.add(int(referenced))
+        parents = {
+            parent_row["source_id"]: parent_row["parent_source_id"]
+            for parent_row in conn.execute("SELECT source_id,parent_source_id FROM manifest_nodes")
+        }
+        for source_id in tuple(selected_nodes):
+            parent_id = parents.get(source_id)
+            while parent_id is not None and parent_id in parents and parent_id not in selected_nodes:
+                selected_nodes.add(parent_id)
+                parent_id = parents.get(parent_id)
+        return selected_nodes
 
     @staticmethod
     def _representative_pilot_documents(conn: sqlite3.Connection, limit: int) -> set[int]:
@@ -755,8 +1129,16 @@ class ManifestStore:
             row = conn.execute("SELECT status FROM migration_runs WHERE run_id=?", (run_id,)).fetchone()
             if not row:
                 raise KeyError(run_id)
-            if row["status"] == RunStatus.COMPLETED:
-                raise StateConflict("A completed run cannot be recovered")
+            recoverable_statuses = {
+                RunStatus.STOPPED,
+                RunStatus.FAILED,
+                RunStatus.COMPLETED_WITH_ERRORS,
+            }
+            if row["status"] not in recoverable_statuses:
+                raise StateConflict(
+                    f"Run with status {row['status']} cannot be recovered; "
+                    "only STOPPED, FAILED or COMPLETED_WITH_ERRORS runs are eligible"
+                )
             conn.execute(
                 """UPDATE run_items SET state=?,lease_owner=NULL,lease_expires_at=NULL,
                    next_attempt_at=?,updated_at=? WHERE run_id=? AND state IN (?,?,?,?)""",
@@ -882,12 +1264,22 @@ class ManifestStore:
             ).fetchone()
             if not row or row["lease_owner"] != worker_id:
                 raise StateConflict("Cannot commit without owning the item lease")
+            run = conn.execute(
+                "SELECT metadata_contract_version FROM migration_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if not run:
+                raise KeyError(run_id)
             conn.execute(
-                """INSERT INTO id_mapping(source_id,target_id,run_id,subtype,migration_id,mapped_at)
-                   VALUES(?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
+                """INSERT INTO id_mapping(
+                       source_id,target_id,run_id,subtype,migration_id,metadata_contract_version,mapped_at
+                   ) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
                    target_id=excluded.target_id,run_id=excluded.run_id,migration_id=excluded.migration_id,
-                   subtype=excluded.subtype,mapped_at=excluded.mapped_at""",
-                (source_id, target_id, run_id, row["subtype"], migration_id, now),
+                   subtype=excluded.subtype,metadata_contract_version=excluded.metadata_contract_version,
+                   mapped_at=excluded.mapped_at""",
+                (
+                    source_id, target_id, run_id, row["subtype"], migration_id,
+                    run["metadata_contract_version"] or METADATA_CONTRACT_VERSION, now,
+                ),
             )
             conn.execute(
                 """UPDATE run_items SET state=?,target_id=?,target_parent_id=?,updated_at=?
@@ -954,7 +1346,8 @@ class ManifestStore:
                 mime_type=row["mime_type"], size=row["data_size"], provider_id=row["provider_id"],
                 provider_data=row["provider_data"], blob_locator=row["blob_locator"],
                 source_sha256=row["source_sha256"], created_at=row["source_created_at"],
-                modified_at=row["source_modified_at"], comment=row["source_comment"],
+                modified_at=row["source_modified_at"], file_date=row["source_file_date"],
+                comment=row["source_comment"],
             ) for row in rows
         ]
 
@@ -992,9 +1385,24 @@ class ManifestStore:
                 raise KeyError((run_id, source_id, version_num))
             return dict(row)
 
-    def mark_mapping_verified(self, source_id: int) -> None:
+    def mark_mapping_verified(
+        self, source_id: int, *, metadata_contract_version: str | None = None,
+    ) -> None:
         with self.transaction(immediate=True) as conn:
-            conn.execute("UPDATE id_mapping SET verified=1 WHERE source_id=?", (source_id,))
+            if metadata_contract_version is None:
+                row = conn.execute(
+                    """SELECT r.metadata_contract_version FROM id_mapping m
+                       JOIN migration_runs r ON r.run_id=m.run_id
+                       WHERE m.source_id=?""",
+                    (source_id,),
+                ).fetchone()
+                metadata_contract_version = (
+                    row["metadata_contract_version"] if row else "legacy-system-attributes"
+                )
+            conn.execute(
+                "UPDATE id_mapping SET verified=1,metadata_contract_version=? WHERE source_id=?",
+                (metadata_contract_version, source_id),
+            )
 
     def lookup_mapping(self, source_id: int) -> dict[str, Any] | None:
         with self.connection() as conn:
@@ -1084,15 +1492,22 @@ class ManifestStore:
             ).fetchall()
             return {row["state"]: row["n"] for row in rows}
 
-    def inventory_summary(self) -> dict[str, Any]:
+    def inventory_summary(self, max_documents: int | None = None) -> dict[str, Any]:
         with self.connection() as conn:
+            scope_ids = self._selected_nodes(conn, max_documents)
+            node_scope, node_params = self._scope_clause(scope_ids, "source_id")
+            version_scope, version_params = self._scope_clause(scope_ids, "doc_source_id")
             row = conn.execute(
                 """SELECT COUNT(*) total_nodes,
                    COALESCE(SUM(subtype IN (0,202,298,848,899)),0) total_containers,
-                   COALESCE(SUM(subtype IN (136,144,154,751)),0) total_docs FROM manifest_nodes"""
+                   COALESCE(SUM(subtype IN (136,144,154,751)),0) total_docs FROM manifest_nodes
+                   WHERE 1=1""" + node_scope,
+                node_params,
             ).fetchone()
             versions = conn.execute(
-                "SELECT COUNT(*) total_versions,COALESCE(SUM(data_size),0) total_bytes FROM manifest_versions"
+                "SELECT COUNT(*) total_versions,COALESCE(SUM(data_size),0) total_bytes "
+                "FROM manifest_versions WHERE 1=1" + version_scope,
+                version_params,
             ).fetchone()
             return {**dict(row), **dict(versions)}
 

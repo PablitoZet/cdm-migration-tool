@@ -69,11 +69,11 @@
       <div class="flex items-center space-x-2 text-xs">
         <span id="badge-db" class="px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-800 shadow-sm">
           <i data-lucide="database" class="w-3.5 h-3.5"></i>
-          <span id="txt-db">Database: Connecting...</span>
+          <span id="txt-db">Database: Checking...</span>
         </span>
         <span id="badge-cloud" class="px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-800 shadow-sm">
           <i data-lucide="cloud" class="w-3.5 h-3.5"></i>
-          <span id="txt-cloud">Cloud API: Ready</span>
+          <span id="txt-cloud">Cloud API: Checking...</span>
         </span>
       </div>
     </div>
@@ -85,16 +85,14 @@
     <!-- SECTION 1: KPI METRICS & EXECUTION CONTROLS -->
     <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
 
-      <!-- Minimalist Scope Context Header -->
+      <!-- Minimalist scope context header -->
       <div class="flex flex-wrap items-center justify-between gap-2 text-xs border-b border-slate-800/80 pb-3">
-        <div class="flex items-center space-x-2">
-          <span class="text-slate-500 font-medium">Active Workspace:</span>
-          <span class="font-bold text-slate-100" id="scope-workspace-title">Selected source scope</span>
-          <span class="text-slate-700">&bull;</span>
-          <span class="font-mono text-sky-400 font-medium" id="scope-node-badge">NodeID: not configured</span>
+        <div class="flex items-center space-x-2 text-slate-400">
+          <span class="font-medium">Source NodeID:</span>
+          <strong class="font-mono text-sky-400" id="scope-node-badge">not configured</strong>
         </div>
         <div class="flex items-center space-x-3 text-[11px] text-slate-400">
-          <span>Target: <strong class="text-slate-200" id="scope-target-cloud">not configured</strong></span>
+          <span>Target NodeID: <strong class="font-mono text-slate-200" id="scope-target-cloud">not configured</strong></span>
         </div>
       </div>
 
@@ -228,6 +226,7 @@
             <div id="parity-summary" class="text-xs text-slate-500 mt-1">Not evaluated</div>
           </div>
           <div class="flex gap-2">
+            <button id="btn-provenance-prerequisite" onclick="openProvenanceModal()" class="hidden px-3 py-1.5 bg-amber-950 text-amber-300 border border-amber-800 rounded text-xs">Configure provenance</button>
             <button onclick="openDuplicateProtectionModal()" class="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded text-xs">Duplicate protection</button>
             <button onclick="openAcceptanceModal()" class="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded text-xs">Acceptance</button>
             <button onclick="showParityDetails()" class="px-3 py-1.5 bg-sky-950 text-sky-300 border border-sky-800 rounded text-xs">Details</button>
@@ -575,15 +574,11 @@
             <span class="block text-[10px] text-slate-500 mt-1">Required only for Business Workspaces that must be created in Cloud.</span>
             <textarea id="pf-workspace-map" rows="4" class="field mono">{}</textarea>
           </label>
-          <label>Owners
-            <span class="block text-[10px] text-slate-500 mt-1">JSON mapping required when Readiness lists an owner: exact source OwnerID on the left → GX39 Member ID of the same person on the right.</span>
-            <textarea id="pf-owner-map" rows="3" class="field mono" placeholder='Example: {"-123456": 789012}'>{}</textarea>
-          </label>
         </div>
       </details>
 
       <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-[11px] text-slate-400">
-        <strong class="text-slate-300">Fixed migration policy:</strong> source dates and owners are preserved; migrated content inherits the approved permissions of the selected GX39 destination. Readiness stops the process if an owner mapping or approval is missing.
+        <strong class="text-slate-300">Fixed migration policy:</strong> Created By remains the migration service account, Owned By is resolved once per distinct source owner, and original dates and owner identity are recorded in CDM Migration Provenance. Readiness stops the process if exact identity evidence, provenance setup or an exception approval is missing.
       </div>
 
       <div id="profile-discovery-result" class="hidden bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs mono whitespace-pre-wrap"></div>
@@ -614,6 +609,59 @@
       <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
         <button onclick="closeModal('modal-duplicate-protection')" class="btn-secondary">Cancel</button>
         <button onclick="saveDuplicateProtection()" class="px-5 py-2 bg-sky-600 hover:bg-sky-500 rounded text-xs font-semibold">Save duplicate protection</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MIGRATION PROVENANCE PREREQUISITE -->
+  <div id="modal-provenance" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-amber-900/60 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-5">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div><h3 class="font-bold text-slate-100">Migration provenance</h3><p class="text-xs text-amber-300">One-time GX39 category setup required by Readiness.</p></div>
+        <button onclick="closeModal('modal-provenance')" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <p class="text-xs text-slate-300 leading-relaxed">Ask the GX39 administrator to create the clearly named <strong>CDM Migration Provenance</strong> category. Enter the returned category ID and attribute keys exactly as qualified for ordinary folders, documents, versions and each Business Workspace route.</p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+        <label>Category ID<input id="prov-category-id" type="number" min="1" class="field" placeholder="Example: 12345"></label>
+        <label>Fallback Member ID<input id="prov-fallback-id" type="number" min="1" class="field" placeholder="Only for approved exceptions"></label>
+        <label>Fallback login<input id="prov-fallback-login" class="field" placeholder="Example: cdm-legacy-owner"></label>
+        <label class="md:col-span-2">Fallback email<input id="prov-fallback-email" class="field" placeholder="Exact GX39 email, if configured"></label>
+        <label>Fallback display name<input id="prov-fallback-display" class="field" placeholder="CDM Legacy Owner"></label>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+        <label>Node fields → qualified attribute keys
+          <span class="block text-[10px] text-slate-500 mt-1">Use the semantic field names from the qualification record.</span>
+          <textarea id="prov-node-keys" rows="8" class="field mono">{}</textarea>
+        </label>
+        <label>Version fields → qualified set/multi-row keys
+          <span class="block text-[10px] text-slate-500 mt-1">Required when the manifest contains document versions.</span>
+          <textarea id="prov-version-keys" rows="8" class="field mono">{}</textarea>
+        </label>
+      </div>
+      <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
+        <button onclick="closeModal('modal-provenance')" class="btn-secondary">Cancel</button>
+        <button onclick="saveProvenance()" class="px-5 py-2 bg-amber-600 hover:bg-amber-500 rounded text-xs font-semibold">Save provenance setup</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- OWNER EXCEPTION APPROVAL -->
+  <div id="modal-owner-approval" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-rose-900/60 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div><h3 class="font-bold text-slate-100">Approve owner exceptions</h3><p class="text-xs text-rose-300">This approval applies only to the exact current exception set and run.</p></div>
+        <button onclick="closeModal('modal-owner-approval')" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+      <div id="owner-approval-summary" class="text-xs text-slate-300 space-y-2"></div>
+      <div class="rounded-lg border border-slate-800 bg-slate-950 p-3 text-[11px] text-slate-400 break-all">Exception digest: <span id="owner-approval-digest" class="mono text-sky-300"></span></div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <label>Operator<input id="owner-approval-operator" class="field" oninput="updateOwnerApprovalButton()" placeholder="Name recorded in the change record"></label>
+        <label>Change record<input id="owner-approval-change" class="field" oninput="updateOwnerApprovalButton()" placeholder="Example: CHG-12345"></label>
+      </div>
+      <label class="flex items-start gap-2 text-xs"><input id="owner-approval-confirm" type="checkbox" class="mt-0.5" onchange="updateOwnerApprovalButton()"><span>I confirm that the listed unresolved or deactivated source owners will use the displayed active fallback, while their original identity remains in provenance.</span></label>
+      <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
+        <button onclick="closeModal('modal-owner-approval')" class="btn-secondary">Cancel</button>
+        <button id="btn-owner-approval" onclick="submitOwnerApproval()" disabled class="px-5 py-2 bg-rose-600 hover:bg-rose-500 rounded text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Approve and continue</button>
       </div>
     </div>
   </div>
@@ -699,6 +747,8 @@
     let latestWorkflow = {};
     let latestInventory = {};
     let latestFreeze = {};
+    let latestOwnerReadiness = null;
+    let pendingOwnerApproval = null;
 
     // Toast Notification System
     function showToast(title, message, type = 'info') {
@@ -745,6 +795,66 @@
       }, 4000);
     }
 
+    function updateConnectionBadges(data) {
+      const badgeDb = document.getElementById('badge-db');
+      const txtDb = document.getElementById('txt-db');
+      const envLabel = currentEnvClass === 'production' ? 'PROD' : currentEnvClass.toUpperCase();
+
+      if (data.source_db && data.source_db.status === 'connected') {
+        badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-emerald-950/60 text-emerald-300 flex items-center space-x-1.5 border border-emerald-700/60 shadow-sm shadow-emerald-950/30";
+        txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"></span> <span>PostgreSQL (${envLabel}): <strong>Online</strong></span>`;
+      } else if (data.source_db && data.source_db.status === 'not_checked') {
+        badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-700";
+        txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Database: <strong>Not checked</strong></span>`;
+      } else {
+        badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-rose-950/60 text-rose-300 flex items-center space-x-1.5 border border-rose-700/60 shadow-sm shadow-rose-950/30";
+        txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block"></span> <span>Database: <strong>Offline</strong></span>`;
+      }
+
+      const badgeCloud = document.getElementById('badge-cloud');
+      const txtCloud = document.getElementById('txt-cloud');
+      const cloudLabel = currentEnvClass === 'production' ? 'PROD' : currentEnvClass.toUpperCase();
+
+      if (data.target_cloud && data.target_cloud.status === 'connected') {
+        badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-emerald-950/60 text-emerald-300 flex items-center space-x-1.5 border border-emerald-700/60 shadow-sm shadow-emerald-950/30";
+        txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"></span> <span>Cloud API (${cloudLabel}): <strong>Online</strong></span>`;
+      } else if (data.target_cloud && data.target_cloud.status === 'unconfigured') {
+        badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-500 flex items-center space-x-1.5 border border-slate-800";
+        txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Cloud API: <strong>Not configured</strong></span>`;
+      } else if (data.target_cloud && data.target_cloud.status === 'not_checked') {
+        badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-500 flex items-center space-x-1.5 border border-slate-800";
+        txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Cloud API: <strong>Not checked</strong></span>`;
+      } else {
+        badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-rose-950/60 text-rose-300 flex items-center space-x-1.5 border border-rose-700/60 shadow-sm shadow-rose-950/30";
+        txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block"></span> <span>Cloud API: <strong>Offline</strong></span>`;
+      }
+    }
+
+    let connectionStatusPromise = null;
+
+    async function fetchConnectionStatus() {
+      if (!connectionStatusPromise) {
+        connectionStatusPromise = (async () => {
+          try {
+            const res = await fetch('/api/status?deep=true');
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || `Connection check failed (${res.status})`);
+            updateConnectionBadges(data);
+            return data;
+          } catch (error) {
+            updateConnectionBadges({
+              source_db: {status: 'error'},
+              target_cloud: {status: 'error'}
+            });
+            return {status: 'error', error: error.message};
+          } finally {
+            connectionStatusPromise = null;
+          }
+        })();
+      }
+      return connectionStatusPromise;
+    }
+
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status');
@@ -759,45 +869,11 @@
         updateSafetyGates(data.parity, data.freeze, data.manifest_stats);
         updateWorkflowControls();
 
-        // Update Scope Context Header
-        if (data.workspace_title) {
-          document.getElementById('scope-workspace-title').textContent = data.workspace_title;
-        }
+        // Keep the source and target scope identifiers visible without duplicating the active profile.
         document.getElementById('scope-node-badge').textContent =
-          `NodeID: ${data.source_workspace_nodeid || 'not configured'}`;
+          data.source_workspace_nodeid || 'not configured';
         document.getElementById('scope-target-cloud').textContent =
-          data.target_workspace_nodeid ? `NodeID: ${data.target_workspace_nodeid}` : 'not configured';
-        // Update DB badge
-        const badgeDb = document.getElementById('badge-db');
-        const txtDb = document.getElementById('txt-db');
-        const envLabel = currentEnvClass === 'production' ? 'PROD' : currentEnvClass.toUpperCase();
-
-        if (data.source_db && data.source_db.status === 'connected') {
-          badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-emerald-950/60 text-emerald-300 flex items-center space-x-1.5 border border-emerald-700/60 shadow-sm shadow-emerald-950/30";
-          txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"></span> <span>PostgreSQL (${envLabel}): <strong>Online</strong></span>`;
-        } else if (data.source_db && data.source_db.status === 'not_checked') {
-          badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-400 flex items-center space-x-1.5 border border-slate-700";
-          txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Database: <strong>Not checked</strong></span>`;
-        } else {
-          badgeDb.className = "px-2.5 py-1.5 rounded-lg bg-rose-950/60 text-rose-300 flex items-center space-x-1.5 border border-rose-700/60 shadow-sm shadow-rose-950/30";
-          txtDb.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block"></span> <span>Database: <strong>Offline</strong></span>`;
-        }
-
-        // Update Cloud API badge
-        const badgeCloud = document.getElementById('badge-cloud');
-        const txtCloud = document.getElementById('txt-cloud');
-        const cloudLabel = currentEnvClass === 'production' ? 'PROD' : currentEnvClass.toUpperCase();
-
-        if (data.target_cloud && data.target_cloud.status === 'connected') {
-          badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-emerald-950/60 text-emerald-300 flex items-center space-x-1.5 border border-emerald-700/60 shadow-sm shadow-emerald-950/30";
-          txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse inline-block"></span> <span>Cloud API (${cloudLabel}): <strong>Online</strong></span>`;
-        } else if (data.target_cloud && (data.target_cloud.status === 'unconfigured' || data.target_cloud.status === 'not_checked')) {
-          badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-slate-900 text-slate-500 flex items-center space-x-1.5 border border-slate-800";
-          txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span> <span>Cloud API: Unconfigured</span>`;
-        } else {
-          badgeCloud.className = "px-2.5 py-1.5 rounded-lg bg-rose-950/60 text-rose-300 flex items-center space-x-1.5 border border-rose-700/60 shadow-sm shadow-rose-950/30";
-          txtCloud.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block"></span> <span>Cloud API: <strong>Offline</strong></span>`;
-        }
+          data.target_workspace_nodeid || 'not configured';
       } catch (e) {
         console.error("Status fetch error", e);
       }
@@ -1215,7 +1291,8 @@
       });
       if (res.ok) {
         showToast("Environment Switched", `Active profile is now [${env.toUpperCase()}].`, "success");
-        fetchStatus();
+        await fetchStatus();
+        await fetchConnectionStatus();
         loadNodesTable();
       } else {
         const err = await res.json();
@@ -1234,14 +1311,41 @@
         if (!window.confirm('Start this run against the configured production destination?')) return;
         confirmation = 'confirmed';
       }
-      await launchMigration(apiMode, confirmation);
+      await requestOwnerReadiness(apiMode, confirmation);
     }
 
-    async function launchMigration(apiMode, confirmation = null) {
+    async function requestOwnerReadiness(apiMode, confirmation = null) {
+      if (apiMode === 'dry_run') {
+        await launchMigration(apiMode, confirmation);
+        return;
+      }
+      try {
+        const pilotScope = apiMode === 'pilot' ? '&max_documents=100' : '';
+        const res = await fetch('/api/owner-readiness?online=true' + pilotScope);
+        const data = await res.json();
+        latestOwnerReadiness = data;
+        if (!res.ok) throw new Error(data.detail || 'Owner readiness could not be checked.');
+        if (data.status === 'APPROVAL_REQUIRED') {
+          openOwnerApprovalModal(data, apiMode, confirmation);
+          return;
+        }
+        if (data.status !== 'PASS') {
+          showToast('Run Not Started', 'Owner readiness is blocked. Resolve the exact Readiness action before starting.', 'error');
+          return;
+        }
+        await launchMigration(apiMode, confirmation);
+      } catch (error) {
+        showToast('Owner Readiness Failed', error.message, 'error');
+      }
+    }
+
+    async function launchMigration(apiMode, confirmation = null, ownerApproval = null) {
+      const body = {mode: apiMode, threads: 8, confirmation: confirmation};
+      if (ownerApproval) body.owner_exception_approval = ownerApproval;
       const res = await fetch('/api/migrate/start', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ mode: apiMode, threads: 8, confirmation: confirmation })
+        body: JSON.stringify(body)
       });
       if (!res.ok) {
         const err = await res.json();
@@ -1255,6 +1359,49 @@
       showToast('Run Started', `${started.mode} · ${started.run_id}`, 'success');
       await fetchStatus();
       setTimeout(loadNodesTable, 1000);
+    }
+
+    function openOwnerApprovalModal(data, apiMode, confirmation) {
+      pendingOwnerApproval = {mode: apiMode, confirmation: confirmation, data: data};
+      const fallback = data.fallback || {};
+      document.getElementById('owner-approval-digest').textContent = data.exception_set_digest || 'unavailable';
+      document.getElementById('owner-approval-operator').value = localStorage.getItem('cdm_owner_operator') || '';
+      document.getElementById('owner-approval-change').value = '';
+      document.getElementById('owner-approval-confirm').checked = false;
+      const summary = document.getElementById('owner-approval-summary');
+      const exceptions = (data.exceptions || []).map(item =>
+        `<div class="rounded-lg border border-slate-800 bg-slate-950 p-2"><strong>Source OwnerID ${escapeHtml(item.source_owner_id)}</strong> · ${escapeHtml(item.reason || 'UNRESOLVED')}<span class="block text-[11px] text-slate-500">login: ${item.summary && item.summary.has_login ? 'present' : 'missing'} · email: ${item.summary && item.summary.has_email ? 'present' : 'missing'} · source status: ${escapeHtml(item.summary && item.summary.identity_status || 'unknown')}</span></div>`
+      ).join('');
+      summary.innerHTML = `<div>Distinct exceptions: <strong>${(data.exceptions || []).length}</strong></div>${exceptions}<div class="rounded-lg border border-amber-800/60 bg-amber-950/20 p-2">Fallback: <strong>${escapeHtml(fallback.display_name || fallback.login || 'not configured')}</strong> · Member ID ${escapeHtml(fallback.id || '—')} · active=${escapeHtml(fallback.active)}</div>`;
+      updateOwnerApprovalButton();
+      openModal('modal-owner-approval');
+    }
+
+    function updateOwnerApprovalButton() {
+      const button = document.getElementById('btn-owner-approval');
+      if (!button) return;
+      button.disabled = !(
+        document.getElementById('owner-approval-confirm').checked &&
+        document.getElementById('owner-approval-operator').value.trim() &&
+        document.getElementById('owner-approval-change').value.trim() &&
+        pendingOwnerApproval && pendingOwnerApproval.data.exception_set_digest
+      );
+    }
+
+    async function submitOwnerApproval() {
+      if (!pendingOwnerApproval) return;
+      const approval = {
+        approved: true,
+        operator: document.getElementById('owner-approval-operator').value.trim(),
+        change_record: document.getElementById('owner-approval-change').value.trim(),
+        exception_set_digest: pendingOwnerApproval.data.exception_set_digest,
+        fallback_member_id: pendingOwnerApproval.data.fallback && pendingOwnerApproval.data.fallback.id
+      };
+      localStorage.setItem('cdm_owner_operator', approval.operator);
+      const pending = pendingOwnerApproval;
+      pendingOwnerApproval = null;
+      closeModal('modal-owner-approval');
+      await launchMigration(pending.mode, pending.confirmation, approval);
     }
 
     function openFullCutoverModal() {
@@ -1296,7 +1443,7 @@
       closeModal('modal-full-cutover');
       button.textContent = 'Verify source and start';
       latestFreeze = data;
-      await launchMigration('full', 'confirmed');
+      await requestOwnerReadiness('full', 'confirmed');
     }
 
     async function stopMigration() {
@@ -1515,7 +1662,6 @@
       setValue('pf-ot-user', profile.ot_cloud_user);
       setValue('pf-category-map', JSON.stringify(profile.category_mappings || {}, null, 2));
       setValue('pf-workspace-map', JSON.stringify(profile.workspace_routes || {}, null, 2));
-      setValue('pf-owner-map', JSON.stringify(profile.owner_mappings || {}, null, 2));
       ['pf-db-password', 'pf-source-cs-password', 'pf-ot-password', 'pf-azure-sas-url'].forEach(id => setValue(id, ''));
       const credentials = profile.credentials_configured || {};
       document.getElementById('pf-db-password').placeholder = credentials.db_password ? 'Saved — enter only to change' : 'Enter password';
@@ -1548,6 +1694,52 @@
       await loadProfiles();
       await fetchStatus();
       showToast('Duplicate Protection Saved', 'Safe retry protection is configured for real uploads.', 'success');
+    }
+
+    function openProvenanceModal() {
+      const profile = profileCache.find(item => item.profile_id === currentEnv) || {};
+      const fallback = profile.owner_fallback || profile.legacy_owner_fallback || {};
+      setValue('prov-category-id', profile.provenance_category_id);
+      setValue('prov-node-keys', JSON.stringify(profile.provenance_attribute_keys || {}, null, 2));
+      setValue('prov-version-keys', JSON.stringify(profile.provenance_version_attribute_keys || {}, null, 2));
+      setValue('prov-fallback-id', fallback.member_id || fallback.id);
+      setValue('prov-fallback-login', fallback.login || fallback.username);
+      setValue('prov-fallback-email', fallback.email);
+      setValue('prov-fallback-display', fallback.display_name || fallback.name);
+      openModal('modal-provenance');
+    }
+
+    async function saveProvenance() {
+      try {
+        const fallbackId = document.getElementById('prov-fallback-id').value.trim();
+        const fallbackLogin = document.getElementById('prov-fallback-login').value.trim();
+        const fallbackEmail = document.getElementById('prov-fallback-email').value.trim();
+        const fallback = fallbackId || fallbackLogin || fallbackEmail ? {
+          member_id: fallbackId ? Number(fallbackId) : null,
+          login: fallbackLogin || null,
+          email: fallbackEmail || null,
+          display_name: document.getElementById('prov-fallback-display').value.trim() || null
+        } : {};
+        const category = document.getElementById('prov-category-id').value.trim();
+        const values = {
+          provenance_category_id: category ? Number(category) : null,
+          provenance_attribute_keys: jsonValue('prov-node-keys'),
+          provenance_version_attribute_keys: jsonValue('prov-version-keys'),
+          owner_fallback: fallback
+        };
+        const res = await fetch('/api/profiles/' + encodeURIComponent(currentEnv), {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({values: values, make_active: false})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Provenance setup could not be saved.');
+        closeModal('modal-provenance');
+        await loadProfiles();
+        await fetchStatus();
+        showToast('Provenance Setup Saved', 'The qualified category and fallback details were saved locally.', 'success');
+      } catch (error) {
+        showToast('Provenance Setup Error', error.message, 'error');
+      }
     }
 
     function openAcceptanceModal() {
@@ -1621,8 +1813,7 @@
           ot_cloud_user: document.getElementById('pf-ot-user').value.trim(),
           verify_ssl: true,
           category_mappings: jsonValue('pf-category-map'),
-          workspace_routes: jsonValue('pf-workspace-map'),
-          owner_mappings: jsonValue('pf-owner-map')
+          workspace_routes: jsonValue('pf-workspace-map')
         };
         if (editingNewProfile) values.environment_class = 'test';
         const secrets = {
@@ -1641,6 +1832,7 @@
         currentEnv = data.active ? id : currentEnv;
         await loadProfiles();
         await fetchStatus();
+        await fetchConnectionStatus();
         document.getElementById('profile-discovery-result').classList.add('hidden');
         closeModal('modal-profile');
         showToast('Setup Saved', 'Connections, mappings and supplied credentials were saved locally.', 'success');
@@ -1677,8 +1869,7 @@
     }
 
     async function testConnections() {
-      const res = await fetch('/api/status?deep=true');
-      showDiscoveryResult(await res.json());
+      showDiscoveryResult(await fetchConnectionStatus());
     }
 
     function setWorkflowAction(id, enabled, enabledTitle, blockedReason) {
@@ -1757,6 +1948,16 @@
 
     function updateSafetyGates(parity, freeze, inventory) {
       latestParity = parity;
+      const provenanceBlockers = [
+        ...(latestWorkflow.pilot_blockers || []),
+        ...(latestWorkflow.full_blockers || [])
+      ];
+      const provenanceButton = document.getElementById('btn-provenance-prerequisite');
+      if (provenanceButton) {
+        provenanceButton.classList.toggle('hidden', !provenanceBlockers.some(blocker =>
+          ['PROVENANCE_CONFIGURATION', 'PROVENANCE_APPLICABILITY', 'PROVENANCE_READBACK_QUALIFICATION'].includes(blocker)
+        ));
+      }
       const parityElement = document.getElementById('parity-summary');
       if (!inventory || !inventory.total_nodes) {
         parityElement.className = 'text-xs text-slate-500 mt-1';
@@ -1785,7 +1986,9 @@
         ACTIVE_RESERVATIONS: 'Checked-out and reserved documents',
         VERSION_COMMENT_PARITY: 'Version comments',
         PERMISSION_PARITY: 'Permissions and access',
-        SYSTEM_ATTRIBUTE_PARITY: 'Dates and owners',
+        OWNER_IDENTITY_PARITY: 'Source owner identity evidence',
+        PROVENANCE_PARITY: 'Migration provenance',
+        CREATOR_PARITY: 'Migration service account creator',
         WORKSPACE_TYPE_PARITY: 'Business Workspace types',
         WORKSPACE_ROLE_PARITY: 'Business Workspace roles',
         LIFECYCLE_PARITY: 'Document operations',
@@ -1871,7 +2074,7 @@
     }
 
     loadProfiles();
-    fetchStatus();
+    fetchStatus().then(() => fetchConnectionStatus());
     loadNodesTable();
     setInterval(pollTelemetry, 1000);
     setInterval(fetchStatus, 5000);

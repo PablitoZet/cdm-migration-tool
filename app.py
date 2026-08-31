@@ -88,6 +88,7 @@ class MigrateRequest(BaseModel):
     threads: int = Field(default=8, ge=1, le=32)
     max_documents: int | None = Field(default=None, ge=1)
     confirmation: str | None = None
+    owner_exception_approval: dict[str, Any] | None = None
 
 
 class RecoverRequest(BaseModel):
@@ -139,7 +140,14 @@ PROFILE_EDITABLE_KEYS = {
     "ot_cloud_url", "otds_url", "ot_cloud_user", "ot_cloud_password_env", "verify_ssl",
     "migration_namespace", "migration_category_id", "migration_attribute_key",
     "permission_strategy", "permission_mappings", "target_acl_approved",
-    "system_attribute_strategy", "system_attribute_field_map", "owner_mappings",
+    "provenance_category_id", "provenance_attribute_keys",
+    "provenance_version_attribute_keys", "owner_fallback", "legacy_owner_fallback",
+    "service_account_login", "service_account_email",
+    "member_lookup_endpoint", "member_lookup_param", "member_lookup_query_template",
+    "member_lookup_fields", "owner_assignment_endpoint", "owner_assignment_field",
+    "provenance_endpoint", "provenance_versions_field",
+    "owner_assignment_qualified", "provenance_category_qualified",
+    "provenance_readback_qualified", "creator_readback_qualified",
     "workspace_routes", "category_mappings", "multipart_version_target_field",
     "workspace_roles_qualified", "lifecycle_operations_qualified",
     "search_and_facets_qualified", "active_workflows_confirmed_zero",
@@ -166,7 +174,9 @@ def status(deep: bool = False):
     freeze = _pipeline.manifest.freeze_status()
     parity = _pipeline.manifest.parity_report(env)
     pilot_preflight = (
-        PreflightAuditor(env, _pipeline.manifest, _config.migration_settings).run(for_mode="pilot")
+        PreflightAuditor(env, _pipeline.manifest, _config.migration_settings).run(
+            for_mode="pilot", max_documents=100
+        )
         if inventory["total_nodes"] else None
     )
     full_preflight = (
@@ -408,10 +418,25 @@ def confirm_freeze(request: FreezeRequest):
 
 
 @app.post("/api/preflight", dependencies=[Depends(require_api_key)])
-def preflight(online: bool = False, sample_blobs: int = Query(0, ge=0, le=100)):
+def preflight(
+    online: bool = False,
+    sample_blobs: int = Query(0, ge=0, le=100),
+    max_documents: int | None = Query(None, ge=1),
+):
     return PreflightAuditor(
         _config.environment(), _pipeline.manifest, _config.migration_settings
-    ).run(online=online, sample_blobs=sample_blobs)
+    ).run(online=online, sample_blobs=sample_blobs, max_documents=max_documents)
+
+
+@app.get("/api/owner-readiness", dependencies=[Depends(require_api_key)])
+def owner_readiness(
+    online: bool = True,
+    max_documents: int | None = Query(None, ge=1),
+):
+    try:
+        return _pipeline.owner_readiness(online=online, max_documents=max_documents)
+    except (StateConflict, ConfigurationError, TerminalMigrationError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/migrate/start", dependencies=[Depends(require_api_key)])
@@ -427,6 +452,7 @@ def start_migration(request: MigrateRequest):
             dry_run=request.mode == "dry_run",
             threads=request.threads,
             mode=request.mode,
+            owner_exception_approval=request.owner_exception_approval,
         )
         return {"status": "started", "run_id": run_id, "mode": request.mode}
     except (StateConflict, ConfigurationError, TerminalMigrationError, ValueError) as exc:

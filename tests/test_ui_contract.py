@@ -23,6 +23,21 @@ class OperatorUiContractTests(unittest.TestCase):
         self.assertIn(tests_guard, self.html)
         self.assertIn('badge.textContent = "NOT AVAILABLE"', self.html)
 
+    def test_connection_badges_use_deep_checks_for_explicit_refreshes_only(self):
+        self.assertIn("fetch('/api/status?deep=true')", self.html)
+        self.assertIn("fetchConnectionStatus();", self.html)
+        self.assertIn("fetchStatus().then(() => fetchConnectionStatus());", self.html)
+        self.assertIn("showDiscoveryResult(await fetchConnectionStatus());", self.html)
+        self.assertNotIn("setInterval(fetchConnectionStatus", self.html)
+        self.assertIn("let connectionStatusPromise = null;", self.html)
+
+    def test_scope_header_shows_source_and_target_ids_without_duplicate_workspace_label(self):
+        self.assertIn("Source NodeID:", self.html)
+        self.assertIn("Target NodeID:", self.html)
+        self.assertNotIn("Active Workspace:", self.html)
+        self.assertNotIn("Selected source scope", self.html)
+        self.assertNotIn("scope-workspace-title", self.html)
+
     def test_missing_link_mapping_has_a_human_readable_fallback(self):
         self.assertIn("This object has not been migrated or is not present in the active manifest.", self.html)
         self.assertNotIn("${data.message}</div>", self.html)
@@ -32,15 +47,19 @@ class OperatorUiContractTests(unittest.TestCase):
         self.assertIn('id="pf-source-cs-url"', self.html)
         self.assertIn('id="pf-source-cs-user"', self.html)
         self.assertIn('id="pf-source-cs-password"', self.html)
-        self.assertIn("exact source OwnerID on the left", self.html)
-        self.assertIn("placeholder='Example: {\"-123456\": 789012}'", self.html)
         self.assertNotIn('id="pf-azure-url"', self.html)
         self.assertNotIn('id="pf-locator"', self.html)
         self.assertNotIn('id="pf-sas-token"', self.html)
         self.assertIn('id="modal-acceptance"', self.html)
-        self.assertIn('Mappings for exceptions — normally leave empty', self.html)
         self.assertIn('id="modal-duplicate-protection"', self.html)
         self.assertIn('id="duplicate-marker-attr"', self.html)
+        self.assertIn('id="modal-provenance"', self.html)
+        self.assertIn('id="prov-category-id"', self.html)
+        self.assertIn('id="prov-node-keys"', self.html)
+        self.assertIn('id="prov-version-keys"', self.html)
+        self.assertIn('id="modal-owner-approval"', self.html)
+        self.assertIn('id="owner-approval-digest"', self.html)
+        self.assertIn('id="owner-approval-change"', self.html)
         self.assertNotIn('id="pf-class"', self.html)
         self.assertNotIn('id="pf-root-maps"', self.html)
         self.assertNotIn('id="pf-system-strategy"', self.html)
@@ -50,12 +69,13 @@ class OperatorUiContractTests(unittest.TestCase):
         self.assertIn('The app creates the selected source root inside it.', self.html)
         self.assertNotIn('R&amp;D workspace DataID', self.html)
         self.assertNotIn('Pilot setup', self.html)
+        self.assertNotIn('owner_mappings', self.html)
 
     def test_unconfigured_scope_never_displays_example_identifiers(self):
-        self.assertIn('id="scope-node-badge">NodeID: not configured</span>', self.html)
+        self.assertIn('id="scope-node-badge">not configured</strong>', self.html)
         self.assertIn('id="scope-target-cloud">not configured</strong>', self.html)
         self.assertIn("data.source_workspace_nodeid || 'not configured'", self.html)
-        self.assertIn("data.target_workspace_nodeid ? `NodeID: ${data.target_workspace_nodeid}`", self.html)
+        self.assertIn("data.target_workspace_nodeid || 'not configured'", self.html)
         self.assertNotIn("NodeID: 1124604", self.html)
         self.assertNotIn(">Cloud DEV</strong>", self.html)
 

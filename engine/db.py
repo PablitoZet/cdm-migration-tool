@@ -79,21 +79,25 @@ class SourceDB:
         with self.snapshot() as (conn, snapshot_id):
             nodes = self._extract_nodes(conn, root_node_id)
             if not nodes:
-                return {"nodes": [], "versions": [], "categories": [], "snapshot": snapshot_id}
+                return {"nodes": [], "versions": [], "categories": [], "owners": [], "snapshot": snapshot_id}
             node_ids = [row["source_id"] for row in nodes]
             versions = self._extract_versions(conn, node_ids)
             categories = self._extract_categories(conn, node_ids)
+            owner_ids = sorted({
+                int(row["owner_id"]) for row in nodes if row.get("owner_id") is not None
+            })
+            owners = self._extract_owners(conn, owner_ids)
         return {
-            "nodes": nodes, "versions": versions, "categories": categories,
+            "nodes": nodes, "versions": versions, "categories": categories, "owners": owners,
             "snapshot": snapshot_id, "extracted_at": datetime.now(UTC).isoformat(),
-            "source_signature": source_signature(nodes, versions, categories),
+            "source_signature": source_signature(nodes, versions, categories, owners),
         }
 
     def inspect_scope(self, root_node_id: int) -> dict[str, Any]:
         """Read-only preview used before committing a manifest extraction."""
         extracted = self.extract_all(root_node_id)
         summary = discovery_summary(
-            extracted["nodes"], extracted["versions"], extracted["categories"]
+            extracted["nodes"], extracted["versions"], extracted["categories"], extracted.get("owners", [])
         )
         summary["snapshot"] = extracted["snapshot"]
         return summary
@@ -248,6 +252,124 @@ class SourceDB:
             cur.execute(query, (node_ids,))
             return [dict(row) for row in cur.fetchall()]
 
+    def _extract_owners(self, conn, owner_ids: list[int]) -> list[dict[str, Any]]:
+        """Read each referenced KUAF identity once without assuming its schema."""
+        if not owner_ids:
+            return []
+        result = {
+            owner_id: {
+                "source_owner_id": owner_id,
+                "login": None,
+                "email": None,
+                "display_name": None,
+                "active": None,
+                "status_value": None,
+                "status_source": None,
+                "identity_status": "UNKNOWN",
+            }
+            for owner_id in owner_ids
+        }
+        id_column = self._first_existing_column(conn, "kuaf", ("id", "userid", "user_id"))
+        if not id_column:
+            return list(result.values())
+        login_column = self._first_existing_column(
+            conn, "kuaf", ("username", "loginname", "login", "user_name")
+        )
+        email_column = self._first_existing_column(
+            conn, "kuaf", ("mailaddress", "email", "emailaddress", "mail")
+        )
+        display_column = self._first_existing_column(
+            conn, "kuaf", ("name", "displayname", "fullname", "full_name")
+        )
+        deleted_column = self._first_existing_column(conn, "kuaf", ("deleted",))
+        disabled_column = self._first_existing_column(conn, "kuaf", ("disabled", "isdisabled"))
+        active_column = self._first_existing_column(conn, "kuaf", ("active", "isactive", "enabled"))
+        status_column = self._first_existing_column(
+            conn, "kuaf", ("userstatus", "status", "accountstatus")
+        )
+        type_column = self._first_existing_column(conn, "kuaf", ("type", "user_type"))
+
+        def expression(column: str | None) -> str:
+            return f"k.{column}" if column else "NULL::text"
+
+        query = f"""
+            SELECT k.{id_column} source_owner_id,
+                   {expression(login_column)} login_value,
+                   {expression(email_column)} email_value,
+                   {expression(display_column)} display_value,
+                   {expression(deleted_column)} deleted_value,
+                   {expression(disabled_column)} disabled_value,
+                   {expression(active_column)} active_value,
+                   {expression(status_column)} status_value,
+                   {expression(type_column)} type_value
+              FROM public.KUAF k
+             WHERE k.{id_column}=ANY(%s)
+             ORDER BY k.{id_column}
+        """
+        with self._cursor(conn) as cur:
+            cur.execute(query, (owner_ids,))
+            rows = [dict(row) for row in cur.fetchall()]
+        seen: set[int] = set()
+        for row in rows:
+            owner_id = int(row["source_owner_id"])
+            if owner_id not in result or owner_id in seen:
+                if owner_id in result:
+                    result[owner_id].update({
+                        "identity_status": "AMBIGUOUS",
+                        "active": None,
+                        "status_value": None,
+                        "status_source": None,
+                    })
+                continue
+            seen.add(owner_id)
+            active, status_source = self._owner_active_state(row)
+            identity_status = "KNOWN"
+            if active is None:
+                identity_status = "STATUS_UNKNOWN"
+            elif not row.get("login_value") and not row.get("email_value"):
+                identity_status = "UNRESOLVED"
+            result[owner_id] = {
+                "source_owner_id": owner_id,
+                "login": self._clean_text(row.get("login_value")),
+                "email": self._clean_text(row.get("email_value")),
+                "display_name": self._clean_text(row.get("display_value")),
+                "active": active,
+                "status_value": self._clean_text(row.get("status_value")),
+                "status_source": status_source,
+                "source_type": self._clean_text(row.get("type_value")),
+                "identity_status": identity_status,
+            }
+        return [result[owner_id] for owner_id in owner_ids]
+
+    @staticmethod
+    def _clean_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _owner_active_state(row: dict[str, Any]) -> tuple[bool | None, str | None]:
+        deleted = row.get("deleted_value")
+        if deleted is not None:
+            parsed = _parse_bool(deleted)
+            return (not parsed if parsed is not None else None), "deleted"
+        disabled = row.get("disabled_value")
+        if disabled is not None:
+            parsed = _parse_bool(disabled)
+            return (not parsed if parsed is not None else None), "disabled"
+        active = row.get("active_value")
+        if active is not None:
+            return _parse_bool(active), "active"
+        status = row.get("status_value")
+        if status is not None:
+            text = str(status).strip().casefold()
+            if text in {"active", "enabled", "1", "true", "open"}:
+                return True, "status"
+            if text in {"inactive", "disabled", "deleted", "0", "false", "closed"}:
+                return False, "status"
+        return None, "status"
+
     @staticmethod
     def _column_exists(conn, table: str, column: str) -> bool:
         with conn.cursor() as cur:
@@ -276,3 +398,19 @@ class SourceDB:
     def extract_node_categories(self, node_ids: list[int]) -> list[dict[str, Any]]:
         with self.snapshot() as (conn, _):
             return self._extract_categories(conn, node_ids)
+
+
+def _parse_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    text = str(value).strip().casefold()
+    if text in {"1", "true", "t", "yes", "y", "active", "enabled", "open"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "inactive", "disabled", "deleted", "closed"}:
+        return False
+    return None

@@ -23,6 +23,7 @@ from .models import (
     TerminalMigrationError,
     UploadResult,
 )
+from .provenance import mapped_provenance_payload, member_identity
 from .tls import configure_native_trust_store
 
 logger = logging.getLogger("CDM.OpenText")
@@ -197,6 +198,27 @@ class OpenTextCloudClient:
         self.permission_strategy = getter("permission_strategy")
         self.source_root_maps_to_target = bool(getter("source_root_maps_to_target", False))
         self.target_root_id = int(getter("target_workspace_nodeid", 0) or 0)
+        self.member_lookup_endpoint = str(getter("member_lookup_endpoint", "/api/v2/members"))
+        self.member_lookup_param = str(getter("member_lookup_param", "where"))
+        self.member_lookup_query_template = str(
+            getter("member_lookup_query_template", "{field}={value}")
+        )
+        self.member_lookup_fields = getter("member_lookup_fields")
+        self.owner_assignment_endpoint = str(
+            getter("owner_assignment_endpoint", "/api/v2/nodes/{target_id}/owner")
+        )
+        self.owner_assignment_field = str(getter("owner_assignment_field", "owner_user_id"))
+        self.provenance_category_id = getter("provenance_category_id")
+        self.provenance_attribute_keys = getter("provenance_attribute_keys", {}) or {}
+        self.provenance_version_attribute_keys = getter(
+            "provenance_version_attribute_keys", {}
+        ) or {}
+        self.provenance_endpoint = str(
+            getter("provenance_endpoint", "/api/v2/nodes/{target_id}/categories/{category_id}")
+        )
+        self.provenance_versions_field = str(
+            getter("provenance_versions_field", "version_rows")
+        )
         self.system_attribute_field_map = getter("system_attribute_field_map", {}) or {
             "created_at": "create_date",
             "modified_at": "modify_date",
@@ -349,9 +371,78 @@ class OpenTextCloudClient:
     def get_node(self, target_id: int) -> dict[str, Any]:
         response = self._request(
             "GET", f"/api/v2/nodes/{target_id}"
-            "?fields=properties{id,name,type,parent_id,size,description,create_date,modify_date,owner_id}"
+            "?fields=properties{id,name,type,parent_id,size,description,create_date,modify_date,"
+            "owner_id,owner_user_id,creator_id,created_by,owner,creator}"
         )
         return response.json().get("results", {}).get("data", {}).get("properties", {})
+
+    def lookup_members(self, identity_key: str, identity_value: str) -> list[dict[str, Any]]:
+        """Perform one GET-only member lookup; tenant query syntax stays configurable."""
+        field = {"login": "login", "email": "email"}.get(identity_key)
+        if field is None:
+            raise TerminalMigrationError(f"Unsupported member identity key: {identity_key}")
+        value = str(identity_value).strip()
+        if not value:
+            return []
+        params: dict[str, Any] = {
+            self.member_lookup_param: self.member_lookup_query_template.format(
+                field=field, value=value,
+            ),
+        }
+        if self.member_lookup_fields:
+            params["fields"] = self.member_lookup_fields
+        response = self._request("GET", self.member_lookup_endpoint, params=params)
+        return _extract_member_rows(response.json())
+
+    # Explicit alias used by preflight adapters and test doubles.
+    find_members = lookup_members
+
+    def get_member(self, member_id: int) -> dict[str, Any]:
+        response = self._request("GET", f"/api/v2/members/{int(member_id)}")
+        rows = _extract_member_rows(response.json())
+        if not rows:
+            raise TerminalMigrationError(f"GX39 member {member_id} was not found")
+        identity = member_identity(rows[0])
+        if identity["id"] != int(member_id):
+            raise TerminalMigrationError(f"GX39 member read-back ID mismatch for {member_id}")
+        return rows[0]
+
+    def assign_owner(self, target_id: int, member_id: int) -> None:
+        endpoint = self.owner_assignment_endpoint.format(
+            target_id=int(target_id), member_id=int(member_id),
+        )
+        body = {self.owner_assignment_field: int(member_id)}
+        self._request("PUT", endpoint, expected=(200, 201, 204), data={"body": json.dumps(body)})
+
+    def read_owner(self, target_id: int) -> dict[str, Any]:
+        properties = self.get_node(target_id)
+        owner = properties.get("owner")
+        if isinstance(owner, dict):
+            identity = member_identity(owner)
+            if identity["id"] is not None:
+                member = self.get_member(int(identity["id"]))
+                return {**member, **member_identity(member)}
+        owner_id = _first_value(properties, "owner_user_id", "owner_id", "ownerid")
+        if owner_id is None:
+            raise TerminalMigrationError(f"Target {target_id} has no readable owner")
+        result: dict[str, Any] = {"id": int(owner_id), "member_id": int(owner_id)}
+        result.update(member_identity(self.get_member(int(owner_id))))
+        return result
+
+    def read_creator(self, target_id: int) -> dict[str, Any]:
+        properties = self.get_node(target_id)
+        creator = properties.get("creator")
+        if isinstance(creator, dict):
+            identity = member_identity(creator)
+            if identity["id"] is not None:
+                member = self.get_member(int(identity["id"]))
+                return {**member, **member_identity(member)}
+        creator_id = _first_value(properties, "creator_id", "created_by", "created_by_id")
+        if creator_id is None:
+            raise TerminalMigrationError(f"Target {target_id} has no readable creator")
+        result: dict[str, Any] = {"id": int(creator_id), "member_id": int(creator_id)}
+        result.update(member_identity(self.get_member(int(creator_id))))
+        return result
 
     def list_permissions(self, target_id: int) -> list[dict[str, Any]]:
         response = self._request("GET", f"/api/v2/nodes/{target_id}/permissions")
@@ -670,26 +761,48 @@ class OpenTextCloudClient:
     def apply_system_attributes(
         self, target_id: int, source: SourceNode | SourceVersion, *, version_num: int | None = None,
     ) -> None:
-        body: dict[str, Any] = {}
-        if source.created_at:
-            body[self.system_attribute_field_map["created_at"]] = source.created_at
-        if source.modified_at:
-            body[self.system_attribute_field_map["modified_at"]] = source.modified_at
-        owner_id = getattr(source, "owner_id", None)
-        if owner_id is not None:
-            mapped_owner = self.owner_mappings.get(str(owner_id))
-            if mapped_owner is None:
-                raise TerminalMigrationError(f"No target owner mapping for source owner {owner_id}")
-            body[self.system_attribute_field_map["owner_id"]] = mapped_owner
-        if not body:
-            return
-        endpoint = (
-            f"/api/v2/nodes/{target_id}/versions/{version_num}"
-            if version_num is not None else f"/api/v2/nodes/{target_id}/systemattributes"
+        raise TerminalMigrationError(
+            "GX39 system dates and creator are read-only; use assign_owner and apply_provenance "
+            "with qualified read-back"
+        )
+
+    def apply_provenance(
+        self, target_id: int, node_values: dict[str, Any],
+        version_values: list[dict[str, Any]] | None = None,
+    ) -> None:
+        category_id = self.provenance_category_id
+        if not category_id:
+            raise TerminalMigrationError("provenance_category_id is required")
+        payload = {
+            "category_id": int(category_id),
+            **mapped_provenance_payload(node_values, self.provenance_attribute_keys),
+        }
+        if version_values is not None:
+            payload[self.provenance_versions_field] = [
+                mapped_provenance_payload(row, self.provenance_version_attribute_keys)
+                for row in version_values
+            ]
+        endpoint = self.provenance_endpoint.format(
+            target_id=int(target_id), category_id=int(category_id),
         )
         self._request(
-            "PUT", endpoint, expected=(200, 201, 204), data={"body": json.dumps(body)}
+            "PUT", endpoint, expected=(200, 201, 204), data={"body": json.dumps(payload)},
         )
+
+    def read_provenance(self, target_id: int) -> dict[str, Any]:
+        category_id = self.provenance_category_id
+        if not category_id:
+            raise TerminalMigrationError("provenance_category_id is required")
+        response = self._request(
+            "GET",
+            f"/api/v2/nodes/{int(target_id)}/categories/{int(category_id)}",
+        )
+        payload = response.json().get("results", {})
+        if isinstance(payload, dict):
+            payload = payload.get("data", payload)
+        if not isinstance(payload, dict):
+            raise TerminalMigrationError(f"Provenance read-back for {target_id} is not an object")
+        return payload
 
     def apply_permission_policy(self, target_id: int, policy: list[dict[str, Any]]) -> None:
         for operation in policy:
@@ -782,6 +895,33 @@ def _extract_version_number(payload: Any) -> int | None:
                 return int(value)
             except (TypeError, ValueError):
                 pass
+    return None
+
+
+def _extract_member_rows(payload: Any) -> list[dict[str, Any]]:
+    value = payload
+    if isinstance(value, dict):
+        results = value.get("results", value)
+        if isinstance(results, dict):
+            value = results.get("data", results.get("members", results.get("users", results)))
+    if isinstance(value, dict):
+        value = value.get("members", value.get("users", [value]))
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data", item)
+        if isinstance(data, dict):
+            rows.append(data)
+    return rows
+
+
+def _first_value(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if mapping.get(key) is not None:
+            return mapping[key]
     return None
 
 

@@ -20,7 +20,9 @@ The migration must preserve:
 - every supported document and version;
 - binary integrity;
 - category values;
-- create/modify dates and owners;
+- source create/modify dates and owner identity as explicit provenance;
+- target `Owned By` from exact active GX39-user resolution, with
+  `Created By` remaining the migration service account;
 - approved effective access and Business Workspace roles;
 - shortcuts/URLs within the approved scope;
 - search, lifecycle operations and legacy-link continuity.
@@ -57,8 +59,12 @@ SaaS. The tool therefore performs controlled API ingestion:
 2. store an immutable local manifest in SQLite;
 3. stream binaries from Azure without full-file local staging;
 4. create supported structures and versions through OpenText REST APIs;
-5. store durable source-to-target mappings;
-6. verify target content and business behavior.
+5. resolve each distinct source owner once and assign target ownership from
+   immutable run-scoped decisions;
+6. write and verify the `CDM Migration Provenance` category, including ordered
+   provenance rows for all document versions;
+7. store durable source-to-target mappings;
+8. verify target content and business behavior.
 
 GX39 generates new NodeIDs. Source DataIDs are retained in local mappings and a
 technical `CDM Migration ID` attribute used for safe retries and future link
@@ -71,7 +77,7 @@ In scope:
 - the selected source root and supported descendants;
 - supported folders, Business Workspaces, documents, versions, shortcuts, URLs
   and collections;
-- mapped categories, dates and owners;
+- mapped categories, target ownership and source-date/owner provenance;
 - approved destination permission inheritance;
 - reconciliation evidence and legacy-to-cloud ID mapping.
 
@@ -105,7 +111,8 @@ Pending corporate evidence:
 - GX39 duplicate attribute and category applicability;
 - GX39 multipart API dialect and large-file behavior;
 - target category and Business Workspace mappings;
-- owner preservation and permission inheritance;
+- exact owner resolution, owner assignment and provenance read-back;
+- permission inheritance;
 - service-account rights, throttling, WAF and token behavior;
 - representative Pilot, operational UAT and measured throughput;
 - final PROD destination and legacy-link implementation.
@@ -136,7 +143,17 @@ not in this public-ready repository.
 4. Configure GX39 duplicate protection.
 5. Scan the intended source and resolve all structural Readiness issues.
 6. Execute Dry Run.
-7. Execute the mandatory GX39 TEST contract matrix.
+7. Execute the mandatory GX39 TEST contract matrix, including:
+   - one ordinary folder and document with exact owner assignment and creator
+     read-back;
+   - `CDM Migration Provenance` node fields and read-back;
+   - first and subsequent document versions with complete ordered provenance
+     rows;
+   - every configured Business Workspace type/template route with owner,
+     provenance and role checks;
+   - one explicitly approved unresolved/deactivated-owner fallback whose
+     original identity remains in provenance;
+   - interrupted/lost-response recovery with immutable owner resolutions.
 8. Run a deterministic Representative Pilot.
 9. Exercise Pause, Stop and Resume interrupted run.
 10. Run live automated verification and operational UAT.
@@ -171,7 +188,8 @@ Go requires all of the following:
 - exact frozen source signature matches the approved scan;
 - GX39 TEST contract suite and Representative Pilot pass;
 - all Readiness checks pass;
-- zero unresolved category/owner/workspace mappings;
+- zero unapproved category/workspace mappings and zero unapproved owner
+  exceptions; every fallback must have an exact run-scoped approval;
 - destination ACL and roles are approved;
 - state backup and recovery rehearsal pass;
 - approved concurrency and OpenText atypical-use acknowledgement;
@@ -191,7 +209,10 @@ verification mismatch or unavailable acceptance owner.
 - all version counts/order;
 - all-version source/target SHA-256 equality;
 - category value read-back;
-- dates/owners and permission evidence;
+- target `Owned By` and migration-service `Created By` read-back;
+- source dates, owner identity and resolution status in provenance, including
+  every version row;
+- permission evidence;
 - zero unresolved or terminal failures.
 
 ### Technical acceptance

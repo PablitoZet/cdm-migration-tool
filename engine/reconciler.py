@@ -11,6 +11,12 @@ from typing import Any
 
 from .manifest import ManifestStore
 from .models import ItemState
+from .provenance import (
+    METADATA_CONTRACT_VERSION,
+    exception_set_digest,
+    provenance_values,
+    version_provenance_values,
+)
 
 
 class AutomatedVerifier:
@@ -25,7 +31,7 @@ class AutomatedVerifier:
             self._hashes(run_id, live and redownload),
             self._categories(run_id, live),
             self._versions(run_id, live),
-            self._system_attributes(run_id, live),
+            self._owner_provenance(run_id, live),
             self._permissions(run_id, live),
         ]
         passed = all(test["status"] == "PASS" for test in tests)
@@ -186,44 +192,106 @@ class AutomatedVerifier:
             failures, f"Checked {len(expected)} document version chains.",
         )
 
-    def _system_attributes(self, run_id: str, live: bool) -> dict[str, Any]:
+    def _owner_provenance(self, run_id: str, live: bool) -> dict[str, Any]:
         failures: list[str] = []
         checked = 0
+        run = self.manifest.run_status(run_id)
+        if run.get("metadata_contract_version") != METADATA_CONTRACT_VERSION:
+            failures.append(
+                f"run metadata contract is {run.get('metadata_contract_version')!r}, "
+                f"expected {METADATA_CONTRACT_VERSION!r}"
+            )
+        resolutions = {
+            resolution.source_owner_id: resolution
+            for resolution in self.manifest.run_owner_resolutions(run_id)
+        }
+        exceptions = [
+            resolution for resolution in resolutions.values()
+            if resolution.resolution_status == "APPROVED_FALLBACK"
+        ]
+        approval = self.manifest.fallback_approval(run_id)
+        if exceptions and (
+            not approval or approval.get("exception_set_digest") != exception_set_digest(exceptions)
+        ):
+            failures.append("fallback approval evidence is missing or has a different exception digest")
         if live and not self.client:
-            failures.append("live system-attribute validation requested without target client")
-        if live and self.client:
-            if getattr(self.client, "system_attribute_strategy", None) != "preserve":
-                failures.append("system_attribute_strategy is not preserve")
-            for row in self.manifest.verification_items(run_id):
-                target_id = row.get("mapped_target_id") or row.get("target_id")
-                if not target_id:
-                    continue
-                if (
-                    bool(getattr(self.client, "source_root_maps_to_target", False))
-                    and int(row.get("depth") or 0) == 0
-                ):
-                    continue
-                try:
-                    props = self.client.get_node(int(target_id))
-                    for source_key, target_key in (
-                        ("source_created_at", "create_date"),
-                        ("source_modified_at", "modify_date"),
+            failures.append("live owner/provenance validation requested without target client")
+        for row in self.manifest.verification_items(run_id):
+            target_id = row.get("mapped_target_id") or row.get("target_id")
+            if not target_id:
+                failures.append(f"{row['source_id']}: no durable target mapping")
+                continue
+            if row.get("metadata_contract_version") != METADATA_CONTRACT_VERSION:
+                failures.append(f"{row['source_id']}: item metadata contract is not current")
+            source_owner = row.get("owner_id")
+            if source_owner is None:
+                failures.append(f"{row['source_id']}: immutable owner resolution is missing")
+                continue
+            source_owner_id = int(str(source_owner))
+            resolution = resolutions.get(source_owner_id)
+            if resolution is None or resolution.target_member_id is None:
+                failures.append(f"{row['source_id']}: immutable owner resolution is missing")
+                continue
+            try:
+                owner = self.manifest.owner_identity(source_owner_id)
+                versions = (
+                    self.manifest.source_versions(int(row["source_id"]))
+                    if int(row["subtype"]) in (136, 144, 154, 751) else []
+                )
+                expected_node = provenance_values(
+                    {
+                        "source_id": row["source_id"],
+                        "source_created_at": row.get("source_created_at"),
+                        "source_modified_at": row.get("source_modified_at"),
+                    },
+                    owner,
+                    resolution,
+                )
+                expected_versions = [
+                    version_provenance_values(
+                        {
+                            "version_num": version.version_num,
+                            "source_created_at": version.created_at,
+                            "source_modified_at": version.modified_at,
+                            "source_file_date": version.file_date,
+                        }
+                    )
+                    for version in versions
+                ]
+                if live:
+                    if not all(
+                        callable(getattr(self.client, name, None))
+                        for name in ("read_owner", "read_creator", "read_provenance")
                     ):
-                        expected = row.get(source_key)
-                        if expected is not None and _normal_time(props.get(target_key)) != _normal_time(expected):
-                            failures.append(f"{row['source_id']}: {target_key} mismatch")
-                    source_owner = row.get("owner_id")
-                    if source_owner is not None:
-                        expected_owner = self.client.owner_mappings.get(str(source_owner))
-                        if expected_owner is None or str(props.get("owner_id")) != str(expected_owner):
-                            failures.append(f"{row['source_id']}: owner mismatch")
-                    checked += 1
-                except Exception as exc:
-                    failures.append(f"{row['source_id']}: {exc}")
+                        failures.append(f"{row['source_id']}: modern metadata read-back is unavailable")
+                        continue
+                    actual_owner = self.client.read_owner(int(target_id))
+                    if _member_id(actual_owner) != int(resolution.target_member_id):
+                        failures.append(f"{row['source_id']}: owner read-back mismatch")
+                    creator = self.client.read_creator(int(target_id))
+                    expected_creator = run.get("service_member_id")
+                    if expected_creator is None or _member_id(creator) != int(expected_creator):
+                        failures.append(f"{row['source_id']}: creator read-back mismatch")
+                    actual_provenance = self.client.read_provenance(int(target_id))
+                    failures.extend(
+                        f"{row['source_id']}: {failure}"
+                        for failure in _provenance_failures(
+                            actual_provenance, expected_node, expected_versions,
+                            getattr(self.client, "provenance_attribute_keys", {}) or {},
+                            getattr(self.client, "provenance_version_attribute_keys", {}) or {},
+                            str(getattr(self.client, "provenance_versions_field", "version_rows")),
+                        )
+                    )
+                checked += 1
+            except Exception as exc:
+                failures.append(f"{row['source_id']}: {type(exc).__name__}: {exc}")
         return _result(
-            "TEST_05_SYSTEM_ATTRIBUTES", "Dates, owner and system-attribute parity",
+            "TEST_05_OWNER_PROVENANCE", "Owner, creator and migration provenance read-back",
             failures, f"Checked {checked} target nodes.",
         )
+
+    # Compatibility alias for callers using the old test method name.
+    _system_attributes = _owner_provenance
 
     def _permissions(self, run_id: str, live: bool) -> dict[str, Any]:
         failures: list[str] = []
@@ -267,6 +335,71 @@ def _normal_time(value: Any) -> str:
         return parsed.astimezone(UTC).isoformat(timespec="seconds")
     except ValueError:
         return text
+
+
+def _member_id(value: Any) -> int | None:
+    if isinstance(value, dict):
+        for key in ("id", "member_id", "memberid", "user_id", "userid", "owner_id"):
+            if value.get(key) is not None:
+                try:
+                    return int(value[key])
+                except (TypeError, ValueError):
+                    return None
+        for nested in value.values():
+            member_id = _member_id(nested)
+            if member_id is not None:
+                return member_id
+    return None
+
+
+def _find_value(value: Any, key: str) -> tuple[bool, Any]:
+    if isinstance(value, dict):
+        if key in value:
+            return True, value[key]
+        for nested in value.values():
+            found, result = _find_value(nested, key)
+            if found:
+                return True, result
+    return False, None
+
+
+def _normal_metadata(value: Any) -> Any:
+    if isinstance(value, str):
+        return _normal_time(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return value
+
+
+def _provenance_failures(
+    actual: dict[str, Any],
+    expected_node: dict[str, Any],
+    expected_versions: list[dict[str, Any]],
+    node_keys: dict[str, Any],
+    version_keys: dict[str, Any],
+    versions_field: str,
+) -> list[str]:
+    failures: list[str] = []
+    for field, expected in expected_node.items():
+        key = str(node_keys.get(field) or field)
+        present, value = _find_value(actual, key)
+        if not present or _normal_metadata(value) != _normal_metadata(expected):
+            failures.append(f"provenance field {field} mismatch")
+    if expected_versions:
+        present, rows = _find_value(actual, versions_field)
+        if not present or not isinstance(rows, list) or len(rows) != len(expected_versions):
+            failures.append("version provenance row count mismatch")
+        else:
+            for index, (expected, actual_row) in enumerate(zip(expected_versions, rows, strict=True), 1):
+                if not isinstance(actual_row, dict):
+                    failures.append(f"version provenance row {index} is not an object")
+                    continue
+                for field, expected_value in expected.items():
+                    key = str(version_keys.get(field) or field)
+                    found, value = _find_value(actual_row, key)
+                    if not found or _normal_metadata(value) != _normal_metadata(expected_value):
+                        failures.append(f"version provenance row {index} field {field} mismatch")
+    return failures
 
 
 def _result(test_id: str, name: str, failures: list[str], details: str) -> dict[str, Any]:

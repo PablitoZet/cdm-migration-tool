@@ -102,7 +102,12 @@ Keep ordinary Migration Setup small and understandable.
 - **Destination parent NodeID** is an existing GX39 folder/workspace that accepts
   child objects. The selected source root is created inside this destination.
 - `source_root_maps_to_target` is fixed to `false` for this tool.
-- Source dates and owners are preserved.
+- `Created By` remains the GX39 migration service account and is verified by
+  read-back. `Owned By` is assigned from one exact, active GX39-user resolution
+  per distinct source KUAF owner.
+- Original source dates and owner identity are preserved in the dedicated
+  `CDM Migration Provenance` category. GX39 system create/modify dates remain
+  target-generated and are not treated as writable source fields.
 - Migrated content inherits the approved permissions of the selected GX39
   destination.
 - Archive Center `acprimary` sources stream versions through the read-only
@@ -193,7 +198,8 @@ GX39 TEST before production:
 - first and subsequent document version multipart semantics;
 - category and multi-row/set payload shapes;
 - Business Workspace type/template creation and role behavior;
-- preservation/read-back of system dates and owners;
+- owner assignment and read-back, creator identity, and provenance category
+  read-back;
 - service-account rights and target ACL inheritance;
 - indexing delay and duplicate-marker read-back;
 - throttling/WAF behavior and token lifetime.
@@ -209,8 +215,9 @@ ambiguous result is reconciled by the migration marker and read-back.
 ## 10. Supported fidelity and explicit exclusions
 
 The quality objective is operational equivalence after unavoidable technical ID
-changes: hierarchy, names, descriptions, content, versions, categories, dates,
-owners, effective access and workspace behavior.
+changes: hierarchy, names, descriptions, content, versions, categories,
+source-date/owner provenance, target ownership, effective access and workspace
+behavior.
 
 Current rules:
 
@@ -350,7 +357,8 @@ collect evidence for all of the following:
 5. Ordinary, threshold-boundary and large multipart uploads.
 6. Interrupted multipart recovery and expired-token recovery.
 7. Lost-response create reconciliation without duplicate objects.
-8. First and subsequent versions, dates, owners and comments.
+8. First and subsequent versions, owner assignment, `Created By`, source-date and
+   owner provenance, and comments.
 9. Categories including multi-row/set fields.
 10. Business Workspace templates and roles.
 11. Destination ACL inheritance and intended user access.

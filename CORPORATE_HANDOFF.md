@@ -26,7 +26,8 @@ repository.
 - The canonical upstream is private; obtain its URL through the approved
   operator channel rather than storing account identifiers in documentation.
 - GitHub quality workflow passes on Python 3.11.
-- Local clean-install validation passes with 62 unit/contract tests, Ruff and
+- Local clean-install validation passes with the full unit/contract suite (76
+  tests in this checkout), Ruff and
   mypy. The Windows bootstrap was also validated on Python 3.14; CI remains
   pinned to the canonical Python 3.11 baseline.
 - The private/home development machine cannot reach corporate PostgreSQL or
@@ -34,8 +35,8 @@ repository.
 - The first corporate GX39 DEV smoke run completed 19/19 objects and 12/12
   versions with hierarchy, hashes, categories, marker read-back and destination
   permission evidence. It is **not yet approved for production execution**
-  because system-date/owner fidelity and the wider qualification matrix remain
-  blocked.
+  because the replacement owner/provenance contract and the wider qualification
+  matrix remain blocked.
 - Dry Run executes offline preflight before creating a run and rejects missing
   structural/category/owner/workspace mapping prerequisites without requiring
   post-Pilot operational acceptance.
@@ -89,24 +90,20 @@ repository.
   exact recursive key lookup for this tenant response shape.
 - GX39 CE 25.4 standard create/update forms expose system create/modify dates
   and owner as readonly. Create permits writable `external_create_date` and
-  `external_modify_date`, but these do not satisfy the current system-attribute
-  preservation contract. Online preflight now blocks real runs unless system
-  dates and owner are writable through qualified node-update and
-  document-version-update contracts; create-form writability alone is
-  insufficient.
-- The agreed fidelity direction, pending implementation and formal acceptance,
-  is: `Created By` remains the migration service account; `Owned By` maps to the
-  corresponding GX39 business user; original source dates and owner provenance
-  are stored in a dedicated `CDM Migration Provenance` category with explicit
-  labels such as `Original Source Created Date (Pre-Migration)` and
-  `Original Source Modified Date (Pre-Migration)`.
-- Owner resolution must run once per distinct source KUAF owner, never once per
-  file. Use exact login/email mappings cached for the run. Unresolved or
-  deactivated owners fail Readiness unless an explicitly approved fallback
-  principal such as `CDM Legacy Owner` is configured; the original source owner
-  remains recorded in provenance. GX39 `Owned By` assignment still requires
-  qualification for ordinary folders/documents and every Business Workspace
-  route.
+  `external_modify_date`, but these do not provide system-date fidelity.
+- The current checkout implements the agreed replacement contract:
+  `Created By` remains the migration service account; `Owned By` is resolved
+  from exact active target identity evidence once per distinct source KUAF
+  owner; and original source dates, owner identity and resolution status are
+  stored in the dedicated `CDM Migration Provenance` category. Documents also
+  carry ordered provenance rows for every source version.
+- Unresolved, ambiguous, deactivated or status-unknown owners fail Readiness
+  unless one exact active fallback such as `CDM Legacy Owner` is configured
+  and the operator approves the displayed exception digest and change record
+  at the run boundary. There is no per-file owner mapping and no silent
+  fallback. Owner assignment, provenance applicability/read-back and the
+  ordinary-folder/document and Business Workspace routes remain unqualified
+  against corporate TEST.
 
 Use `git log -1 --oneline` to identify the exact checked-out revision. Never
 assume that a release ZIP and the Git checkout are at the same revision.
@@ -120,9 +117,10 @@ commercial migration-product UX.
 - Successful profile saves close Migration Setup and render confirmation toasts
   above modal overlays so operators can see the outcome. Save errors also render
   inline inside Migration Setup and do not depend on a transient toast.
-- Migration Readiness lists missing source owner IDs locally so the operator can
-  populate the exact GX39 Member ID mapping without exposing account names. The
-  Owners field includes the required JSON direction and syntax example.
+- Migration Readiness reports source-owner identity completeness and, online,
+  exact target resolution evidence without exposing bulk account lists. Owner
+  exceptions are approved contextually for one run; ordinary setup does not
+  expose per-owner numeric mappings.
 - Verified GX39 and Azure HTTPS connections use the native operating-system
   certificate store, including approved corporate CAs installed on Windows.
 - Profiles and credentials are configured in the UI.
@@ -134,7 +132,9 @@ commercial migration-product UX.
   Workspace in the configured source database. A document is not a valid root.
 - **Destination parent NodeID** may identify any approved GX39 container that
   accepts child objects. The selected source root is created beneath it.
-- Source dates and owners are preserved.
+- `Created By` remains the migration service account; `Owned By` is assigned
+  from immutable exact owner resolutions. Original source dates and owner
+  identity are preserved in `CDM Migration Provenance`.
 - Migrated objects inherit the approved permissions of the destination.
 - Duplicate protection uses a dedicated indexed GX39 text attribute such as
   `CDM Migration ID`, with value
@@ -155,11 +155,12 @@ The main workflow is:
 4. Full Cutover;
 5. live reconciliation and business acceptance.
 
-## 3. First corporate test: authorized scope
+## 3. Next corporate qualification: authorized scope
 
-The first run should use the current version without adding large new features.
-Its purpose is to expose the real corporate integration contract before more
-code is written.
+The next run should use the current version and the new owner/provenance
+contract. Its purpose is to qualify the remaining corporate integration
+contracts before production approval; it must not be treated as a production
+run.
 
 Use only:
 
@@ -231,7 +232,9 @@ The following are explicitly unknown until tested against corporate systems:
 - multipart start/part/complete requests and responses;
 - category, set and multi-row attribute payloads;
 - Business Workspace type/template creation and roles;
-- preservation and read-back of dates and owners;
+- exact target owner/creator read-back and source-date/owner provenance;
+- provenance category applicability, ordered version rows and read-back;
+- ordinary and Business Workspace owner-assignment routes;
 - permission inheritance and intended-user access;
 - duplicate-attribute indexing delay and ambiguous-create reconciliation;
 - token expiry/renewal behavior;
@@ -254,13 +257,19 @@ source evidence. Do not report Dry Run as a full binary-integrity test.
 
 ## 7. Agreed pre-production hardening backlog
 
-Do not add all items blindly before the initial smoke test. First incorporate
-the observed corporate API contract. Before production approval, however, the
-following work is required.
+The owner/provenance implementation and its local regression coverage are now in
+the checkout. Before production approval, the following corporate evidence and
+remaining hardening work is required.
 
-### P0 — fix findings from the corporate smoke test
+### P0 — qualify the owner/provenance replacement contract
 
-- Reproduce each finding with sanitized fixtures.
+- Reproduce the owner-read/write and provenance findings with sanitized fixtures
+  on ordinary folders/documents and every Business Workspace route.
+- Have the GX39 administrator provide and qualify the dedicated provenance
+  category, date precision, set/multi-row payload and read-back contract.
+- Qualify exact login/email matching, service-account creator read-back and the
+  explicitly approved fallback path for deactivated/unresolved owners.
+- Exercise lost-response and interruption recovery after owner/provenance writes.
 - Keep GX39 contract changes isolated in `engine/client.py`.
 - Add regression tests before changing the pipeline.
 - Rerun the complete quality suite and the affected corporate test.
@@ -354,16 +363,20 @@ Validation runs against production.
 
 1. Fix and regression-test real corporate contract findings.
 2. Build and run the synthetic fidelity dataset in Content Server DEV.
-3. Exercise multipart interruption, token expiry and ambiguous-create recovery.
-4. Run a synthetic scale test if resources and OpenText limits allow it.
-5. Complete the GX39 TEST acceptance matrix.
-6. Add and complete Source Integrity Validation against the intended production
+3. Qualify exact owner resolution, `Owned By`, `Created By` and
+   `CDM Migration Provenance` on ordinary and Business Workspace routes,
+   including an approved fallback.
+4. Exercise multipart interruption, token expiry and ambiguous-create recovery
+   after metadata writes.
+5. Run a synthetic scale test if resources and OpenText limits allow it.
+6. Complete the GX39 TEST acceptance matrix.
+7. Add and complete Source Integrity Validation against the intended production
    source without target writes.
-7. Rehearse online state backup and recovery.
-8. During the approved cutover: stop work, make source read-only, confirm the
+8. Rehearse online state backup and recovery.
+9. During the approved cutover: stop work, make source read-only, confirm the
    signature, run Production Canary, make a go/no-go decision, then continue
    Full Cutover.
-9. Run full automated reconciliation and technical/business acceptance before
+10. Run full automated reconciliation and technical/business acceptance before
    users are enabled on GX39.
 
 No lower environment can provide 100% certainty about production rate limits,
@@ -398,9 +411,10 @@ archive and its checksum.
 Use the following intent, adapted with the sanitized test result:
 
 > Read `AGENTS.md` and `CORPORATE_HANDOFF.md` completely, then inspect the
-> canonical architecture/runbook and current tests. We are performing the first
-> non-sensitive DEV-to-GX39-DEV smoke test. Diagnose the attached sanitized
-> result without weakening safety gates or changing unrelated code. Separate an
+> canonical architecture/runbook and current tests. We are qualifying the
+> owner/provenance replacement contract against a non-sensitive GX39 DEV/TEST
+> dataset after the earlier 19/19 smoke. Diagnose sanitized results without
+> weakening safety gates or changing unrelated code. Separate an
 > environment/configuration problem from an application defect. If code must
 > change, add a regression test, update canonical documentation, run the full
 > required quality suite and state exactly which corporate contracts remain

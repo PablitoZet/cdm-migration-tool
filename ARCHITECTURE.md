@@ -16,9 +16,11 @@ not a shared network service.
 ## Quality objective
 
 After migration, users should work in the cloud scope with equivalent hierarchy,
-names, descriptions, binary content, version chains, category values, dates,
-owners, effective access and workspace behavior. Source and target technical IDs
-will necessarily differ.
+names, descriptions, binary content, version chains, category values, source
+dates and owner provenance, target ownership, effective access and workspace
+behavior. Source and target technical IDs will necessarily differ. GX39 system
+create/modify dates remain target-generated; the original values are preserved
+as explicit provenance.
 
 The tool fails closed when required equivalence cannot be proven. It does not
 silently flatten unsupported types or accept a partial verification result.
@@ -61,7 +63,11 @@ created inside it.
 The application fixes these policies:
 
 - `source_root_maps_to_target=false`;
-- preserve source dates and owners;
+- leave `Created By` as the migration service account;
+- resolve and assign `Owned By` once per distinct source KUAF owner using exact
+  active login/email identity;
+- preserve original source dates, owner identity and resolution status in the
+  `CDM Migration Provenance` category;
 - inherit the approved permissions of the destination;
 - TLS verification enabled;
 - Azure binary access derived from one container SAS URL.
@@ -69,15 +75,23 @@ The application fixes these policies:
 Tenant ID mappings remain explicit exceptions:
 
 - source category definition/attribute to GX39 category attribute;
-- source owner ID to GX39 user ID;
+- source owner identity to an exact GX39 user identity, with an approved
+  run-scoped fallback only for unresolved/deactivated exceptions;
 - Business Workspace subtype/type to target workspace type/template.
 
-Every real run performs online target capability checks. If GX39 create forms
-expose system dates or owner as missing/readonly, preservation fails before a
-new run is created; writable `external_*` dates are not silently treated as
-equivalent to system dates. Node-update and document-version-update contracts
-must both be explicitly qualified; create-form writability alone cannot pass
-the gate.
+Every real run performs online target capability checks. Owner assignment for
+ordinary folders/documents and every Business Workspace route, provenance
+applicability/read-back, creator read-back and ordered version-provenance rows
+must be explicitly qualified before a real run. GX39 system dates are not sent
+to create/update APIs, and writable `external_*` dates are not silently treated
+as equivalent to system dates.
+
+The fixed provenance category uses business labels beginning with
+`Original Source ... (Pre-Migration)`, including source DataID, created/modified
+dates, owner ID/login/email/display name, source system and owner resolution
+status. Documents additionally store ordered rows for each original version's
+number, created date, modified date and file date. Values use deterministic
+UTC ISO 8601 normalization and are verified by target read-back.
 
 Direct Azure reads require source provider metadata that resolves
 deterministically to a blob locator. Archive Center `acprimary`/`ixos`
@@ -98,8 +112,9 @@ extracts:
 The manifest stores the active profile ID and source root. Reusing an inventory
 with a different profile or root is blocked.
 
-The deterministic signature covers hierarchy, relevant metadata, version
-identity/size/locator and category values. Before production Full Cutover, the
+The deterministic signature covers hierarchy, relevant metadata, owner
+identity/status, version identity/size/locator and category values. Before
+production Full Cutover, the
 operator confirms that the source is read-only and the application re-reads the
 scope. A different signature rejects the cutover.
 
@@ -197,7 +212,9 @@ Production verification requires:
 - complete version counts and order;
 - non-empty source and target SHA-256 values with equality for every version;
 - category values mapped and read back;
-- dates/owners read back according to policy;
+- target owner, migration service-account creator and source-date/owner
+  provenance read back according to the current metadata contract;
+- complete ordered version-provenance rows read back for every document;
 - destination permissions and Business Workspace behavior qualified;
 - search, lifecycle and legacy-link acceptance evidence.
 
@@ -218,6 +235,7 @@ hash for every included file, and a sibling `.sha256` protects the ZIP.
 ## Integration claims
 
 Unit tests and local Dry Run verify deterministic engine behavior, not tenant
-compatibility. GX39 multipart, target schemas, workspace routes, permissions,
-token behavior, WAF/rate limits, indexing and throughput remain corporate TEST
-qualification obligations described in `DEPLOYMENT_AND_QUALIFICATION.md`.
+compatibility. GX39 multipart, target schemas, owner-write routes, provenance
+category/set payloads, workspace routes, permissions, token behavior,
+WAF/rate limits, indexing and throughput remain corporate TEST qualification
+obligations described in `DEPLOYMENT_AND_QUALIFICATION.md`.

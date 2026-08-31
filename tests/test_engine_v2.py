@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
@@ -24,12 +26,22 @@ from engine.models import (
     RetryableMigrationError,
     RunMode,
     RunStatus,
+    SourceNode,
     SourceVersion,
     TerminalMigrationError,
     UploadResult,
 )
 from engine.pipeline import MigrationPipeline
 from engine.preflight import PreflightAuditor
+from engine.provenance import (
+    NODE_PROVENANCE_FIELDS,
+    VERSION_PROVENANCE_FIELDS,
+    OwnerIdentity,
+    OwnerResolution,
+    exception_set_digest,
+    member_identity,
+    resolve_owner_identity,
+)
 from engine.reconciler import AutomatedVerifier
 from engine.source import AzureBlobBinarySource, ContentServerBinarySource, LocalBinarySource
 
@@ -111,6 +123,75 @@ class FakeTarget:
         return self.next_id
 
 
+class ModernFakeTarget(FakeTarget):
+    def __init__(self):
+        super().__init__()
+        self.members = [
+            {
+                "id": 4200, "login": "source-owner", "email": "owner@example.invalid",
+                "display_name": "Source Owner", "active": True,
+            },
+            {
+                "id": 4300, "login": "legacy-owner", "email": "legacy@example.invalid",
+                "display_name": "CDM Legacy Owner", "active": True,
+            },
+            {
+                "id": 9001, "login": "migration-service", "email": "service@example.invalid",
+                "display_name": "Migration Service", "active": True,
+            },
+        ]
+        self.members_by_id = {member["id"]: member for member in self.members}
+        self.lookup_calls = []
+        self.owner_calls = []
+        self.provenance_calls = []
+        self.provenance = {}
+        self.provenance_versions_field = "version_rows"
+        provenance = _provenance_config()
+        self.provenance_attribute_keys = provenance["provenance_attribute_keys"]
+        self.provenance_version_attribute_keys = provenance["provenance_version_attribute_keys"]
+        self.username = "migration-service"
+
+    def lookup_members(self, identity_key, identity_value):
+        self.lookup_calls.append((identity_key, identity_value))
+        expected = str(identity_value).strip().casefold()
+        return [
+            dict(member) for member in self.members
+            if str(member.get(identity_key) or "").strip().casefold() == expected
+        ]
+
+    def get_member(self, member_id):
+        return dict(self.members_by_id[member_id])
+
+    def assign_owner(self, target_id, member_id):
+        self.owner_calls.append((target_id, member_id))
+        self.nodes[target_id]["owner_id"] = member_id
+
+    def apply_provenance(self, target_id, node_values, version_values=None):
+        self.provenance_calls.append((target_id, node_values, version_values))
+        values = {
+            self.provenance_attribute_keys[field]: value
+            for field, value in node_values.items()
+        }
+        if version_values is not None:
+            values[self.provenance_versions_field] = [
+                {
+                    self.provenance_version_attribute_keys[field]: value
+                    for field, value in row.items()
+                }
+                for row in version_values
+            ]
+        self.provenance[target_id] = values
+
+    def read_owner(self, target_id):
+        return self.get_member(self.nodes[target_id]["owner_id"])
+
+    def read_creator(self, _target_id):
+        return self.get_member(9001)
+
+    def read_provenance(self, target_id):
+        return dict(self.provenance[target_id])
+
+
 class AmbiguousOnceTarget(FakeTarget):
     def __init__(self):
         super().__init__()
@@ -166,6 +247,20 @@ def _config():
         "migration_settings": {
             "worker_threads": 2, "max_worker_threads": 4, "verify_sha256": True,
             "dry_run_require_blob_locator": True, "max_item_attempts": 2,
+        },
+    }
+
+
+def _provenance_config(category_id=600):
+    return {
+        "provenance_category_id": category_id,
+        "provenance_attribute_keys": {
+            field: f"{category_id}_{index + 1}"
+            for index, field in enumerate(NODE_PROVENANCE_FIELDS)
+        },
+        "provenance_version_attribute_keys": {
+            field: f"{category_id}_{index + 20}"
+            for index, field in enumerate(VERSION_PROVENANCE_FIELDS)
         },
     }
 
@@ -268,6 +363,89 @@ class SourceExtractionTests(unittest.TestCase):
             _TestSourceDB({})._extract_versions(connection, [3])
 
 
+class ProvenanceTests(unittest.TestCase):
+    def test_member_display_name_is_not_used_as_login_evidence(self):
+        member = member_identity({
+            "id": 7,
+            "name": "Display Only",
+            "active": True,
+        })
+        self.assertIsNone(member["login"])
+        self.assertEqual(member["display_name"], "Display Only")
+
+    def test_nested_member_shape_preserves_exact_identity_fields(self):
+        member = member_identity({
+            "properties": {
+                "id": 7,
+                "login": "alice",
+                "email": "alice@example.invalid",
+                "active": "true",
+            }
+        })
+        self.assertEqual(member["id"], 7)
+        self.assertEqual(member["login"], "alice")
+        self.assertEqual(member["email"], "alice@example.invalid")
+        self.assertTrue(member["active"])
+
+    def test_dual_identifiers_must_converge_on_one_active_member(self):
+        calls = []
+
+        def lookup(identity_key, identity_value):
+            calls.append((identity_key, identity_value))
+            return [{
+                "id": 7,
+                "login": "Alice",
+                "email": "alice@example.invalid",
+                "display_name": "Alice",
+                "active": True,
+            }]
+
+        resolution = resolve_owner_identity(
+            OwnerIdentity(
+                42, login=" alice ", email="ALICE@example.invalid",
+                display_name="Alice", active=True,
+            ),
+            lookup,
+        )
+        self.assertEqual(resolution.resolution_status, "EXACT")
+        self.assertEqual(resolution.target_member_id, 7)
+        self.assertEqual(calls, [
+            ("login", " alice "),
+            ("email", "ALICE@example.invalid"),
+        ])
+
+    def test_conflicting_or_unknown_target_matches_fail_closed(self):
+        owner = OwnerIdentity(42, login="alice", active=True)
+        ambiguous = resolve_owner_identity(
+            owner,
+            lambda _key, _value: [
+                {"id": 7, "login": "alice", "active": True},
+                {"id": 8, "login": "alice", "active": True},
+            ],
+        )
+        self.assertEqual(ambiguous.reason, "AMBIGUOUS")
+
+        unknown = resolve_owner_identity(
+            owner,
+            lambda _key, _value: [{"id": 7, "login": "alice"}],
+        )
+        self.assertEqual(unknown.reason, "STATUS_UNKNOWN")
+
+    def test_deactivated_source_owner_does_not_trigger_a_lookup(self):
+        calls = []
+        resolution = resolve_owner_identity(
+            OwnerIdentity(42, login="retired", active=False),
+            lambda key, value: calls.append((key, value)) or [],
+        )
+        self.assertEqual(resolution.reason, "DEACTIVATED")
+        self.assertEqual(calls, [])
+
+    def test_exception_digest_changes_when_source_identity_changes(self):
+        first = OwnerResolution(42, "first", 4300, "APPROVED_FALLBACK", reason="DEACTIVATED")
+        second = OwnerResolution(42, "second", 4300, "APPROVED_FALLBACK", reason="DEACTIVATED")
+        self.assertNotEqual(exception_set_digest([first]), exception_set_digest([second]))
+
+
 class ManifestTests(unittest.TestCase):
     def test_empty_manifest_readiness_is_not_reported_as_passed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -298,27 +476,145 @@ class ManifestTests(unittest.TestCase):
             reopened = ManifestStore(path)
             reopened.close()
 
+    def test_schema_v3_migrates_without_losing_verified_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "state.db")
+            with sqlite3.connect(path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO schema_meta(key,value) VALUES ('schema_version','3');
+                    CREATE TABLE manifest_nodes (
+                        source_id INTEGER PRIMARY KEY, parent_source_id INTEGER,
+                        name TEXT NOT NULL, subtype INTEGER NOT NULL, type_name TEXT NOT NULL,
+                        depth INTEGER NOT NULL, path TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                        source_created_at TEXT, source_modified_at TEXT, owner_id INTEGER,
+                        group_id INTEGER, permissions_id INTEGER, extra_json TEXT NOT NULL DEFAULT '{}',
+                        extracted_at TEXT NOT NULL
+                    );
+                    CREATE TABLE manifest_versions (
+                        doc_source_id INTEGER NOT NULL, version_num INTEGER NOT NULL,
+                        file_name TEXT NOT NULL, mime_type TEXT NOT NULL, data_size INTEGER NOT NULL,
+                        provider_id INTEGER, provider_data TEXT, blob_locator TEXT, source_sha256 TEXT,
+                        source_created_at TEXT, source_modified_at TEXT, source_comment TEXT,
+                        PRIMARY KEY(doc_source_id, version_num)
+                    );
+                    CREATE TABLE manifest_categories (
+                        source_id INTEGER NOT NULL, def_id INTEGER NOT NULL, cat_name TEXT,
+                        attr_key TEXT NOT NULL, row_num INTEGER NOT NULL DEFAULT 0,
+                        value_json TEXT NOT NULL, target_category_id INTEGER, target_attr_key TEXT,
+                        PRIMARY KEY(source_id, def_id, attr_key, row_num)
+                    );
+                    CREATE TABLE migration_runs (
+                        run_id TEXT PRIMARY KEY, environment TEXT NOT NULL, mode TEXT NOT NULL,
+                        root_node_id INTEGER NOT NULL, status TEXT NOT NULL, config_fingerprint TEXT,
+                        source_snapshot TEXT, started_at TEXT, completed_at TEXT, created_at TEXT NOT NULL,
+                        stop_requested INTEGER NOT NULL DEFAULT 0, notes TEXT
+                    );
+                    CREATE TABLE run_items (
+                        run_id TEXT NOT NULL, source_id INTEGER NOT NULL, phase TEXT NOT NULL,
+                        state TEXT NOT NULL, target_id INTEGER, target_parent_id INTEGER,
+                        attempt_count INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, lease_expires_at TEXT,
+                        next_attempt_at TEXT, last_error_code TEXT, last_error TEXT,
+                        bytes_transferred INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+                        PRIMARY KEY(run_id, source_id)
+                    );
+                    CREATE TABLE version_transfers (
+                        run_id TEXT NOT NULL, source_id INTEGER NOT NULL, version_num INTEGER NOT NULL,
+                        state TEXT NOT NULL, target_version_num INTEGER, source_sha256 TEXT,
+                        target_sha256 TEXT, upload_key TEXT, next_part INTEGER NOT NULL DEFAULT 1,
+                        part_size INTEGER, bytes_transferred INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT, updated_at TEXT NOT NULL,
+                        PRIMARY KEY(run_id, source_id, version_num)
+                    );
+                    CREATE TABLE id_mapping (
+                        source_id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL, run_id TEXT NOT NULL,
+                        subtype INTEGER NOT NULL, migration_id TEXT NOT NULL UNIQUE,
+                        verified INTEGER NOT NULL DEFAULT 0, mapped_at TEXT NOT NULL
+                    );
+                    CREATE TABLE attempt_log (
+                        attempt_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+                        source_id INTEGER, version_num INTEGER, operation TEXT NOT NULL,
+                        outcome TEXT NOT NULL, http_status INTEGER, correlation_id TEXT,
+                        detail TEXT, created_at TEXT NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO manifest_nodes(
+                        source_id,parent_source_id,name,subtype,type_name,depth,path,extracted_at
+                    ) VALUES(1,999,'legacy',0,'Folder',0,'legacy','2024-01-01T00:00:00+00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO migration_runs(
+                        run_id,environment,mode,root_node_id,status,created_at
+                    ) VALUES('legacy-run','dev','full',9000,'COMPLETED','2024-01-01T00:00:00+00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO id_mapping(
+                        source_id,target_id,run_id,subtype,migration_id,verified,mapped_at
+                    ) VALUES(1,7001,'legacy-run',0,'CDM:legacy:1',1,'2024-01-01T00:00:00+00:00')
+                    """
+                )
+            conn.close()
+
+            store = ManifestStore(path)
+            self.assertEqual(store.metadata()["schema_version"], "4")
+            self.assertEqual(store.lookup_mapping(1)["target_id"], 7001)
+            self.assertEqual(store.lookup_mapping(1)["verified"], 1)
+            with store.connection() as conn:
+                run_columns = {
+                    row["name"] for row in conn.execute("PRAGMA table_info(migration_runs)")
+                }
+                item_columns = {
+                    row["name"] for row in conn.execute("PRAGMA table_info(run_items)")
+                }
+                version_columns = {
+                    row["name"] for row in conn.execute("PRAGMA table_info(manifest_versions)")
+                }
+            self.assertTrue({"metadata_contract_version", "service_member_id"} <= run_columns)
+            self.assertIn("metadata_contract_version", item_columns)
+            self.assertIn("source_file_date", version_columns)
+            store.close()
+
     def test_parity_contract_requires_explicit_operational_qualification(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "content.bin"
             content.write_bytes(b"parity")
             store = ManifestStore(str(Path(tmp) / "state.db"))
             nodes, versions = _inventory(content)
+            for node in nodes:
+                node["owner_id"] = 42
             store.import_extracted_data(nodes, versions, [])
             incomplete = _config()["environments"]["dev"]
             incomplete_report = store.parity_report(incomplete)
             self.assertEqual(incomplete_report["status"], "FAIL")
             owner_check = next(
                 check for check in incomplete_report["checks"]
-                if check["id"] == "SYSTEM_ATTRIBUTE_PARITY"
+                if check["id"] == "OWNER_IDENTITY_PARITY"
             )
-            self.assertIn("unmapped_source_owner_ids=", owner_check["detail"])
+            self.assertIn("missing_owner_rows=", owner_check["detail"])
+            store.import_extracted_data(
+                nodes, versions, [], owners=[{
+                    "source_owner_id": 42,
+                    "login": "source-owner",
+                    "email": "owner@example.invalid",
+                    "display_name": "Source Owner",
+                    "active": True,
+                }],
+            )
             qualified = {
                 **incomplete,
+                **_provenance_config(),
                 "permission_strategy": "inherit_target",
                 "target_acl_approved": True,
                 "system_attribute_strategy": "preserve",
-                "owner_mappings": {},
+                "creator_readback_qualified": True,
                 "workspace_roles_qualified": True,
                 "lifecycle_operations_qualified": True,
                 "search_and_facets_qualified": True,
@@ -328,6 +624,32 @@ class ManifestTests(unittest.TestCase):
                 "personal_state_out_of_scope_approved": True,
             }
             self.assertEqual(store.parity_report(qualified)["status"], "PASS")
+            store.close()
+
+    def test_unresolved_owner_identity_is_an_offline_parity_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.bin"
+            content.write_bytes(b"unresolved owner")
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes, versions = _inventory(content)
+            for node in nodes:
+                node["owner_id"] = 42
+            store.import_extracted_data(
+                nodes,
+                versions,
+                [],
+                owners=[{
+                    "source_owner_id": 42,
+                    "active": True,
+                    "identity_status": "UNRESOLVED",
+                }],
+            )
+            report = store.parity_report(_config()["environments"]["dev"])
+            owner_check = next(
+                check for check in report["checks"] if check["id"] == "OWNER_IDENTITY_PARITY"
+            )
+            self.assertEqual(owner_check["status"], "FAIL")
+            self.assertIn("42", owner_check["detail"])
             store.close()
 
     def test_pilot_contains_only_selected_documents_and_ancestors(self):
@@ -352,6 +674,52 @@ class ManifestTests(unittest.TestCase):
             store.import_extracted_data(nodes, versions, [])
             run_id = store.create_run("dev", RunMode.PILOT, 9000, max_documents=1)
             self.assertEqual(store.run_summary(run_id)["total_nodes"], 3)
+            store.close()
+
+    def test_pilot_owner_scope_matches_selected_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes = [
+                {"source_id": 1, "parent_source_id": 999, "name": "root", "subtype": 0,
+                 "type_name": "Folder", "depth": 0, "path": "root", "owner_id": 10},
+                {"source_id": 2, "parent_source_id": 1, "name": "selected", "subtype": 0,
+                 "type_name": "Folder", "depth": 1, "path": "root/selected"},
+                {"source_id": 3, "parent_source_id": 1, "name": "unused", "subtype": 0,
+                 "type_name": "Folder", "depth": 1, "path": "root/unused", "owner_id": 99},
+                {"source_id": 4, "parent_source_id": 2, "name": "doc", "subtype": 144,
+                 "type_name": "Document", "depth": 2, "path": "root/selected/doc", "owner_id": 42},
+                {"source_id": 5, "parent_source_id": 3, "name": "doc2", "subtype": 144,
+                 "type_name": "Document", "depth": 2, "path": "root/unused/doc2"},
+            ]
+            owners = [
+                {"source_owner_id": 10, "login": "root-owner", "active": True},
+                {"source_owner_id": 42, "login": "selected-owner", "active": True},
+                {"source_owner_id": 99, "login": "unused-owner", "active": True},
+            ]
+            store.import_extracted_data(nodes, [
+                {"doc_source_id": 4, "version_num": 1, "file_name": "a", "mime_type": "x", "data_size": 1},
+                {"doc_source_id": 5, "version_num": 1, "file_name": "b", "mime_type": "x", "data_size": 1},
+            ], [], owners=owners)
+            self.assertEqual(store.owner_ids_for_scope(1), {10, 42})
+            resolutions = [
+                OwnerResolution(
+                    owner["source_owner_id"],
+                    OwnerIdentity(**owner).fingerprint,
+                    owner["source_owner_id"] + 4000,
+                    "EXACT",
+                    target_login=owner["login"],
+                    target_active=True,
+                )
+                for owner in owners[:2]
+            ]
+            run_id = store.create_run(
+                "dev", RunMode.PILOT, 9000, max_documents=1,
+                owner_resolutions=resolutions,
+            )
+            self.assertEqual(
+                {row.source_owner_id for row in store.run_owner_resolutions(run_id)},
+                {10, 42},
+            )
             store.close()
 
     def test_retry_limit_and_parent_dependency(self):
@@ -433,6 +801,37 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(states[retryable["source_id"]], (ItemState.RETRY_WAIT, 0))
             self.assertEqual(states[terminal["source_id"]], (ItemState.FAILED_TERMINAL, 1))
 
+    def test_recovery_rejects_active_and_unqualified_run_statuses(self):
+        statuses = (
+            RunStatus.CREATED,
+            RunStatus.RUNNING,
+            RunStatus.PAUSED,
+            RunStatus.STOPPING,
+            RunStatus.COMPLETED,
+        )
+        for status in statuses:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = ManifestStore(str(Path(tmp) / "state.db"))
+                store.import_extracted_data([{
+                    "source_id": 1, "parent_source_id": 999, "name": "root",
+                    "subtype": 0, "type_name": "Folder", "depth": 0, "path": "root",
+                }], [], [])
+                run_id = store.create_run("dev", RunMode.FULL, 9000)
+                if status == RunStatus.RUNNING:
+                    store.start_run(run_id)
+                elif status == RunStatus.PAUSED:
+                    store.start_run(run_id)
+                    store.pause_run(run_id)
+                elif status == RunStatus.STOPPING:
+                    store.start_run(run_id)
+                    store.request_stop(run_id)
+                elif status == RunStatus.COMPLETED:
+                    store.finish_run(run_id, status)
+                with self.assertRaisesRegex(StateConflict, "cannot be recovered"):
+                    store.recover_run(run_id)
+                self.assertEqual(store.run_status(run_id)["status"], status)
+                store.close()
+
 
 class PipelineTests(unittest.TestCase):
     def test_recovery_online_preflight_failure_does_not_mutate_run(self):
@@ -459,14 +858,14 @@ class PipelineTests(unittest.TestCase):
                         return_value={
                             "status": "FAIL",
                             "checks": [{
-                                "id": "TARGET_SYSTEM_ATTRIBUTE_PRESERVATION",
+                                "id": "OWNER_IDENTITY_PARITY",
                                 "status": "FAIL",
                             }],
                         },
                     ),
                     self.assertRaisesRegex(
                         TerminalMigrationError,
-                        "TARGET_SYSTEM_ATTRIBUTE_PRESERVATION",
+                        "OWNER_IDENTITY_PARITY",
                     ),
                 ):
                     pipeline.recover_run(run_id, 1)
@@ -588,7 +987,7 @@ class PipelineTests(unittest.TestCase):
             )) as second:
                 self.assertNotEqual(first._config_fingerprint(), second._config_fingerprint())
 
-    def test_dry_run_rejects_missing_owner_mapping_before_creating_a_run(self):
+    def test_dry_run_rejects_missing_source_owner_identity_before_creating_a_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "document.txt"
             content.write_bytes(b"owner mapping")
@@ -596,7 +995,6 @@ class PipelineTests(unittest.TestCase):
             config["environments"]["dev"].update({
                 "source_workspace_nodeid": 1,
                 "system_attribute_strategy": "preserve",
-                "owner_mappings": {},
             })
             with closing(MigrationPipeline(
                 config, str(Path(tmp) / "state.db"),
@@ -608,7 +1006,7 @@ class PipelineTests(unittest.TestCase):
                 pipeline.manifest.import_extracted_data(
                     nodes, versions, [], source_root_id=1, source_profile_id="dev",
                 )
-                with self.assertRaisesRegex(TerminalMigrationError, "OWNER_MAPPING_COVERAGE"):
+                with self.assertRaisesRegex(TerminalMigrationError, "OWNER_IDENTITY_COVERAGE"):
                     pipeline.start_migration(dry_run=True, threads=1, mode="dry_run")
                 self.assertIsNone(pipeline.manifest.latest_run())
 
@@ -687,14 +1085,19 @@ class PipelineTests(unittest.TestCase):
                 with self.assertRaisesRegex(Exception, "source read-only freeze"):
                     pipeline.start_migration(threads=1, mode="full")
 
-    def test_preserve_strategy_applies_node_and_version_system_attributes(self):
+    def test_owner_and_provenance_are_applied_and_read_back(self):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "document.txt"
             content.write_bytes(b"dated version")
+            second_content = Path(tmp) / "document-v2.txt"
+            second_content.write_bytes(b"second version")
             config = _config()
-            config["environments"]["dev"]["system_attribute_strategy"] = "preserve"
-            config["environments"]["dev"]["owner_mappings"] = {"42": 4200}
-            target = FakeTarget()
+            config["environments"]["dev"].update({
+                **_provenance_config(),
+                "service_account_login": "migration-service",
+                "service_account_email": "service@example.invalid",
+            })
+            target = ModernFakeTarget()
             with closing(MigrationPipeline(
                 config, str(Path(tmp) / "state.db"),
                 target=target, binary_source=LocalBinarySource(),
@@ -702,15 +1105,224 @@ class PipelineTests(unittest.TestCase):
                 nodes, versions = _inventory(content)
                 for node in nodes:
                     node.update({"source_created_at": "2024-01-01T00:00:00Z", "owner_id": 42})
-                versions[0]["source_created_at"] = "2024-01-02T00:00:00Z"
-                pipeline.manifest.import_extracted_data(nodes, versions, [])
+                versions[0].update({
+                    "source_created_at": "2024-01-02T00:00:00Z",
+                    "source_modified_at": "2024-01-03T00:00:00Z",
+                    "source_file_date": "2024-01-04T00:00:00Z",
+                })
+                versions.append({
+                    **versions[0],
+                    "version_num": 2,
+                    "file_name": second_content.name,
+                    "blob_locator": str(second_content),
+                    "data_size": second_content.stat().st_size,
+                    "source_created_at": "2024-02-02T00:00:00Z",
+                    "source_modified_at": "2024-02-03T00:00:00Z",
+                    "source_file_date": "2024-02-04T00:00:00Z",
+                })
+                pipeline.manifest.import_extracted_data(
+                    nodes, versions, [], owners=[{
+                        "source_owner_id": 42,
+                        "login": "source-owner",
+                        "email": "owner@example.invalid",
+                        "display_name": "Source Owner",
+                        "active": True,
+                    }],
+                )
 
                 run_id = pipeline.start_migration(threads=2, mode="full")
                 self.assertTrue(pipeline.wait(5))
                 self.assertEqual(pipeline.manifest.run_status(run_id)["status"], RunStatus.COMPLETED)
-                version_calls = [call for call in target.system_attribute_calls if call[2] is not None]
-                self.assertEqual(len(version_calls), 1)
-                self.assertEqual(version_calls[0][2], 1)
+                self.assertEqual(len(target.lookup_calls), 4)
+                self.assertEqual({member_id for _, member_id in target.owner_calls}, {4200})
+                self.assertEqual(len(target.provenance_calls), 2)
+                document_provenance = next(
+                    call for call in target.provenance_calls if call[2] is not None
+                )
+                self.assertEqual(
+                    [row["version_number"] for row in document_provenance[2]],
+                    [1, 2],
+                )
+                self.assertEqual(
+                    document_provenance[2][1]["version_file_date"],
+                    "2024-02-04T00:00:00.000000Z",
+                )
+                self.assertEqual(
+                    target.provenance[target.nodes[target.owner_calls[0][0]]["id"]][
+                        target.provenance_attribute_keys["source_owner_resolution_status"]
+                    ],
+                    "EXACT",
+                )
+
+    def test_fallback_approval_is_digest_bound_and_persisted_in_run_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "document.txt"
+            content.write_bytes(b"fallback owner")
+            config = _config()
+            config["environments"]["dev"].update({
+                **_provenance_config(),
+                "service_account_login": "migration-service",
+                "service_account_email": "service@example.invalid",
+                "owner_fallback": {
+                    "member_id": 4300,
+                    "login": "legacy-owner",
+                    "email": "legacy@example.invalid",
+                },
+            })
+            target = ModernFakeTarget()
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=target, binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                for node in nodes:
+                    node["owner_id"] = 77
+                pipeline.manifest.import_extracted_data(
+                    nodes, versions, [], owners=[{
+                        "source_owner_id": 77,
+                        "login": "retired-owner",
+                        "email": "retired@example.invalid",
+                        "display_name": "Retired Owner",
+                        "active": False,
+                    }],
+                )
+                readiness = pipeline.owner_readiness()
+                self.assertEqual(readiness["status"], "APPROVAL_REQUIRED")
+                approval = {
+                    "approved": True,
+                    "exception_set_digest": readiness["exception_set_digest"],
+                    "fallback_member_id": readiness["fallback"]["id"],
+                    "operator": "operator@example.invalid",
+                    "change_record": "CHG-OWNER-1",
+                    "confirmation": "I approve this exact owner exception set",
+                }
+                changed_nodes = [dict(node) for node in nodes]
+                changed_nodes[0]["owner_id"] = 77
+                pipeline.manifest.import_extracted_data(
+                    changed_nodes, versions, [], owners=[{
+                        "source_owner_id": 77,
+                        "login": "retired-owner",
+                        "email": "retired-renamed@example.invalid",
+                        "display_name": "Retired Owner",
+                        "active": False,
+                    }],
+                )
+                with self.assertRaisesRegex(TerminalMigrationError, "digest"):
+                    pipeline.start_migration(
+                        threads=1, mode="full", owner_exception_approval=approval,
+                    )
+
+                readiness = pipeline.owner_readiness()
+                approval = {
+                    "approved": True,
+                    "exception_set_digest": readiness["exception_set_digest"],
+                    "fallback_member_id": readiness["fallback"]["id"],
+                    "operator": "operator@example.invalid",
+                    "change_record": "CHG-OWNER-2",
+                    "confirmation": "I approve this exact owner exception set",
+                }
+                run_id = pipeline.start_migration(
+                    threads=1, mode="full", owner_exception_approval=approval,
+                )
+                self.assertTrue(pipeline.wait(5))
+                self.assertEqual(
+                    pipeline.manifest.run_status(run_id)["status"],
+                    RunStatus.COMPLETED,
+                )
+                resolution = pipeline.manifest.run_owner_resolutions(run_id)[0]
+                self.assertEqual(resolution.resolution_status, "APPROVED_FALLBACK")
+                self.assertEqual(resolution.target_member_id, 4300)
+                self.assertEqual({member_id for _, member_id in target.owner_calls}, {4300})
+                self.assertEqual(
+                    target.provenance[target.owner_calls[0][0]][
+                        target.provenance_attribute_keys["source_owner_login"]
+                    ],
+                    "retired-owner",
+                )
+
+    def test_missing_provenance_readback_is_a_terminal_item_failure(self):
+        class MissingProvenanceTarget(ModernFakeTarget):
+            def read_provenance(self, _target_id):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "document.txt"
+            content.write_bytes(b"missing readback")
+            config = _config()
+            config["environments"]["dev"].update({
+                **_provenance_config(),
+                "service_account_login": "migration-service",
+                "service_account_email": "service@example.invalid",
+            })
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=MissingProvenanceTarget(), binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                for node in nodes:
+                    node["owner_id"] = 42
+                pipeline.manifest.import_extracted_data(
+                    nodes, versions, [], owners=[{
+                        "source_owner_id": 42,
+                        "login": "source-owner",
+                        "email": "owner@example.invalid",
+                        "active": True,
+                    }],
+                )
+                run_id = pipeline.start_migration(threads=1, mode="full")
+                self.assertTrue(pipeline.wait(5))
+                with pipeline.manifest.connection() as conn:
+                    item = conn.execute(
+                        "SELECT state,last_error FROM run_items WHERE run_id=? AND source_id=3",
+                        (run_id,),
+                    ).fetchone()
+                self.assertEqual(item["state"], ItemState.FAILED_TERMINAL)
+                self.assertIn("provenance", str(item["last_error"]).lower())
+
+    def test_pilot_resolves_only_owners_in_the_pilot_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "document.txt"
+            content.write_bytes(b"pilot owner scope")
+            config = _config()
+            config["environments"]["dev"].update({
+                **_provenance_config(),
+                "service_account_login": "migration-service",
+                "service_account_email": "service@example.invalid",
+            })
+            target = ModernFakeTarget()
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=target, binary_source=LocalBinarySource(),
+            )) as pipeline:
+                nodes, versions = _inventory(content)
+                nodes.append({
+                    "source_id": 4, "parent_source_id": 999, "name": "outside-pilot",
+                    "subtype": 144, "type_name": "Document", "depth": 0,
+                    "path": "outside-pilot", "owner_id": 99,
+                })
+                for node in nodes:
+                    node["owner_id"] = 42 if node["source_id"] != 4 else 99
+                pipeline.manifest.import_extracted_data(
+                    nodes, versions, [], owners=[
+                        {
+                            "source_owner_id": 42, "login": "source-owner",
+                            "email": "owner@example.invalid", "active": True,
+                        },
+                        {
+                            "source_owner_id": 99, "login": "outside-owner",
+                            "email": "outside@example.invalid", "active": True,
+                        },
+                    ],
+                )
+                run_id = pipeline.start_migration(
+                    max_items=1, threads=1, mode="pilot",
+                )
+                self.assertTrue(pipeline.wait(5))
+                self.assertEqual(
+                    {row.source_owner_id for row in pipeline.manifest.run_owner_resolutions(run_id)},
+                    {42},
+                )
+                self.assertEqual(len(target.lookup_calls), 4)
 
     def test_dry_run_isolated_then_full_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -723,8 +1335,16 @@ class PipelineTests(unittest.TestCase):
                 target=FakeTarget(), binary_source=LocalBinarySource(),
             )) as pipeline:
                 nodes, versions = _inventory(content)
+                for node in nodes:
+                    node["owner_id"] = 42
                 pipeline.manifest.import_extracted_data(
                     nodes, versions, [], source_root_id=1, source_profile_id="dev",
+                    owners=[{
+                        "source_owner_id": 42,
+                        "login": "source-owner",
+                        "email": "owner@example.invalid",
+                        "active": True,
+                    }],
                 )
 
                 dry_id = pipeline.start_migration(dry_run=True, threads=2, mode="dry_run")
@@ -826,6 +1446,47 @@ class TransportTests(unittest.TestCase):
         client.migration_attribute_key = "108324_2"
         client._request = lambda *_args, **_kwargs: Response()
         self.assertTrue(client._migration_id_matches(999, "CDM:test:123"))
+
+    def test_container_routes_cover_ordinary_folder_and_business_workspace(self):
+        class Response:
+            def json(self):
+                return {"results": {"data": {"id": 7654}}}
+
+        cases = (
+            (
+                SourceNode(10, 1, "ordinary", 0, "Folder", 1, "root/ordinary"),
+                "/api/v2/nodes",
+                {"type": 0},
+            ),
+            (
+                SourceNode(11, 1, "workspace", 848, "Project Workspace", 1, "root/workspace"),
+                "/api/v2/businessworkspaces/",
+                {"wksp_type_id": 71, "template_id": 72},
+            ),
+        )
+        for node, expected_endpoint, expected_fields in cases:
+            with self.subTest(subtype=node.subtype):
+                client = object.__new__(OpenTextCloudClient)
+                client.migration_category_id = 1
+                client.migration_attribute_key = "1_2"
+                client.workspace_routes = {
+                    "Project Workspace": {"workspace_type_id": 71, "template_id": 72},
+                }
+                calls = []
+
+                def request(method, endpoint, calls=calls, **kwargs):
+                    calls.append((method, endpoint, kwargs))
+                    return Response()
+
+                client._request = request
+                client.find_by_migration_id = lambda *_args, **_kwargs: None
+                self.assertEqual(client.create_container(node, 9000, "CDM:test:10"), 7654)
+                self.assertEqual(calls[0][0], "POST")
+                self.assertEqual(calls[0][1], expected_endpoint)
+                body = json.loads(calls[0][2]["data"]["body"])
+                for key, value in expected_fields.items():
+                    self.assertEqual(body[key], value)
+                self.assertEqual(body["roles"]["categories"]["1_2"], "CDM:test:10")
 
     def test_version_listing_unwraps_gx39_nested_version_shape(self):
         class Response:
@@ -1259,8 +1920,16 @@ class PreflightTests(unittest.TestCase):
             content.write_bytes(b"sample")
             store = ManifestStore(str(Path(tmp) / "state.db"))
             nodes, versions = _inventory(content)
+            for node in nodes:
+                node["owner_id"] = 42
             store.import_extracted_data(
                 nodes, versions, [], source_root_id=1, source_profile_id="qa",
+                owners=[{
+                    "source_owner_id": 42,
+                    "login": "source-owner",
+                    "email": "owner@example.invalid",
+                    "active": True,
+                }],
             )
             values = {
                 **_config()["environments"]["dev"],
@@ -1327,32 +1996,89 @@ class PreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             content = Path(tmp) / "content.bin"
             content.write_bytes(b"pilot")
-            store = ManifestStore(str(Path(tmp) / "state.db"))
-            nodes, versions = _inventory(content)
-            store.import_extracted_data(
-                nodes, versions, [], source_root_id=1, source_profile_id="qa",
-            )
-            values = {
-                **_config()["environments"]["dev"],
-                "source_workspace_nodeid": 1,
-                "target_acl_approved": True,
-                "system_attribute_strategy": "preserve",
-                "active_workflows_confirmed_zero": True,
-                "historical_audit_out_of_scope_approved": True,
-                "personal_state_out_of_scope_approved": True,
-                "workspace_roles_qualified": False,
-                "lifecycle_operations_qualified": False,
-                "search_and_facets_qualified": False,
-                "legacy_links_qualified": False,
-            }
-            auditor = PreflightAuditor(EnvironmentConfig("qa", values), store, {})
-            pilot = auditor.run(for_mode="pilot")
-            full = auditor.run(for_mode="full")
-            pilot_parity = next(check for check in pilot["checks"] if check["id"] == "FUNCTIONAL_PARITY")
-            full_parity = next(check for check in full["checks"] if check["id"] == "FUNCTIONAL_PARITY")
-            self.assertEqual(pilot_parity["status"], "PASS")
-            self.assertEqual(full_parity["status"], "FAIL")
-            store.close()
+            with closing(ManifestStore(str(Path(tmp) / "state.db"))) as store:
+                nodes, versions = _inventory(content)
+                for node in nodes:
+                    node["owner_id"] = 42
+                store.import_extracted_data(
+                    nodes, versions, [], source_root_id=1, source_profile_id="qa",
+                    owners=[{
+                        "source_owner_id": 42,
+                        "login": "source-owner",
+                        "email": "owner@example.invalid",
+                        "active": True,
+                    }],
+                )
+                values = {
+                    **_config()["environments"]["dev"],
+                    **_provenance_config(),
+                    "source_workspace_nodeid": 1,
+                    "target_acl_approved": True,
+                    "system_attribute_strategy": "preserve",
+                    "active_workflows_confirmed_zero": True,
+                    "historical_audit_out_of_scope_approved": True,
+                    "personal_state_out_of_scope_approved": True,
+                    "workspace_roles_qualified": False,
+                    "lifecycle_operations_qualified": False,
+                    "search_and_facets_qualified": False,
+                    "legacy_links_qualified": False,
+                }
+                auditor = PreflightAuditor(EnvironmentConfig("qa", values), store, {})
+                pilot = auditor.run(for_mode="pilot")
+                full = auditor.run(for_mode="full")
+                pilot_parity = next(check for check in pilot["checks"] if check["id"] == "FUNCTIONAL_PARITY")
+                full_parity = next(check for check in full["checks"] if check["id"] == "FUNCTIONAL_PARITY")
+                self.assertEqual(pilot_parity["status"], "PASS")
+                self.assertEqual(full_parity["status"], "FAIL")
+
+    def test_pilot_preflight_scopes_owner_and_version_checks_to_selected_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selected_content = Path(tmp) / "selected.bin"
+            selected_content.write_bytes(b"selected")
+            outside_content = Path(tmp) / "outside.bin"
+            outside_content.write_bytes(b"x")
+            nodes, versions = _inventory(selected_content)
+            nodes.extend([
+                {
+                    "source_id": 4, "parent_source_id": 2, "name": "outside.bin", "subtype": 144,
+                    "type_name": "Document", "depth": 2, "path": "source-root/child/outside.bin",
+                    "owner_id": 99,
+                },
+            ])
+            versions.append({
+                "doc_source_id": 4, "version_num": 1, "file_name": "outside.bin",
+                "mime_type": "application/octet-stream", "data_size": outside_content.stat().st_size,
+                "provider_id": 1, "blob_locator": str(outside_content),
+            })
+            for node in nodes[:3]:
+                node["owner_id"] = 42
+            with closing(ManifestStore(str(Path(tmp) / "state.db"))) as store:
+                store.import_extracted_data(
+                    nodes, versions, [], source_root_id=1, source_profile_id="qa",
+                    owners=[{
+                        "source_owner_id": 42, "login": "source-owner",
+                        "email": "owner@example.invalid", "active": True,
+                    }],
+                )
+                auditor = PreflightAuditor(
+                    EnvironmentConfig("qa", {
+                        **_config()["environments"]["dev"],
+                        "source_workspace_nodeid": 1,
+                    }),
+                    store,
+                    {},
+                )
+                pilot = auditor.run(for_mode="pilot", max_documents=1)
+                full = auditor.run(for_mode="full")
+                pilot_owner = next(
+                    check for check in pilot["checks"] if check["id"] == "OWNER_IDENTITY_COVERAGE"
+                )
+                full_owner = next(
+                    check for check in full["checks"] if check["id"] == "OWNER_IDENTITY_COVERAGE"
+                )
+                self.assertEqual(pilot_owner["status"], "PASS")
+                self.assertEqual(full_owner["status"], "FAIL")
+                self.assertEqual(store.inventory_summary(1)["total_nodes"], 3)
 
 
 if __name__ == "__main__":
