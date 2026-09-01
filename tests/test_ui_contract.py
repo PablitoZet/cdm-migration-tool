@@ -27,7 +27,11 @@ class OperatorUiContractTests(unittest.TestCase):
         self.assertIn("fetch('/api/status?deep=true')", self.html)
         self.assertIn("fetchConnectionStatus();", self.html)
         self.assertIn("fetchStatus().then(() => fetchConnectionStatus());", self.html)
-        self.assertIn("showDiscoveryResult(await fetchConnectionStatus());", self.html)
+        self.assertIn("/test-connections", self.html)
+        self.assertIn("body: JSON.stringify({values: profileFormValues()})", self.html)
+        self.assertIn("renderConnectionTest(data);", self.html)
+        self.assertIn('id="connection-test-result"', self.html)
+        self.assertIn("Technical details", self.html)
         self.assertNotIn("setInterval(fetchConnectionStatus", self.html)
         self.assertIn("let connectionStatusPromise = null;", self.html)
 

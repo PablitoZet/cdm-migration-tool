@@ -141,6 +141,19 @@ CDM_OT_PASSWORD_<PROFILE>
 CDM_AZURE_SAS_URL_<PROFILE>
 ```
 
+### Test before saving
+
+Migration Setup provides **Test connections (without saving)**. It tests the
+values currently present in the form, including newly entered credentials,
+without writing `config.json`, replacing the active runtime profile or changing
+SQLite state. The source check uses the read-only PostgreSQL path and the target
+check authenticates to GX39; it does not create or update target objects.
+
+The dialog shows a short status for each connection first. Expand **Technical
+details** only when diagnosing a failure. Save the setup after the displayed
+connection checks pass; an unsaved successful test is not a persisted profile
+configuration.
+
 ## 5. Configure duplicate protection
 
 Before the first real upload, select **Duplicate protection**.

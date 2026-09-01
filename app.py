@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from engine.client import OpenTextCloudClient
 from engine.config import (
     SECRET_KEYS,
     AppConfig,
@@ -26,6 +27,7 @@ from engine.config import (
     save_config,
     validate_profile_id,
 )
+from engine.db import SourceDB
 from engine.manifest import StateConflict
 from engine.models import TerminalMigrationError
 from engine.pipeline import MigrationPipeline
@@ -115,6 +117,10 @@ class CredentialRequest(BaseModel):
     azure_storage_sas_token: str | None = None
     azure_storage_sas_url: str | None = None
     clear: bool = False
+
+
+class ConnectionTestRequest(BaseModel):
+    values: dict[str, object]
 
 
 class DiscoveryRequest(BaseModel):
@@ -259,6 +265,51 @@ def profiles():
         }
         result.append(view)
     return {"active_profile": _config.default_environment, "profiles": result}
+
+
+@app.post("/api/profiles/{profile_id}/test-connections", dependencies=[Depends(require_api_key)])
+def test_profile_connections(profile_id: str, request: ConnectionTestRequest):
+    try:
+        profile_id = validate_profile_id(profile_id)
+    except ConfigurationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    unknown = set(request.values) - PROFILE_EDITABLE_KEYS
+    if unknown:
+        raise HTTPException(422, f"Unsupported profile fields: {sorted(unknown)}")
+
+    with _runtime_lock:
+        if _pipeline.is_running:
+            raise HTTPException(409, "Cannot test connections while a run is active")
+        current = _config.environments.get(profile_id)
+        values = dict(current.values) if current else {}
+        values.update({
+            key: value for key, value in request.values.items()
+            if key not in SECRET_KEYS or value not in (None, "")
+        })
+        try:
+            draft = EnvironmentConfig(
+                profile_id, normalize_profile_values(profile_id, values),
+            )
+        except ConfigurationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        max_retries = int(_config.migration_settings.get("max_retries", 5))
+
+    source_status = SourceDB(draft).test_connection()
+    target_client: OpenTextCloudClient | None = None
+    try:
+        target_client = OpenTextCloudClient(draft, max_retries)
+        target_status = target_client.test_connection()
+    except RuntimeError as exc:
+        target_status = {"status": "error", "error": str(exc)}
+    finally:
+        if target_client is not None:
+            target_client.close()
+    return {
+        "status": "tested",
+        "tested_without_saving": True,
+        "source_db": source_status,
+        "target_cloud": target_status,
+    }
 
 
 @app.put("/api/profiles/{profile_id}", dependencies=[Depends(require_api_key)])

@@ -55,6 +55,13 @@ A fresh installation has two editable profiles:
 The operator configures both through Migration Setup. Local `config.json` stores
 credentials and is excluded from Git and release archives.
 
+Migration Setup can test the current draft values before saving. The draft
+connection check creates temporary source and target clients, performs only the
+read-only PostgreSQL connection check and GX39 authentication, and returns
+sanitized connection results without changing `config.json`, the active runtime
+configuration or SQLite state. The UI renders a concise status first and keeps
+the full response behind expandable technical details.
+
 The selected Source root DataID may be any supported folder/workspace in the
 configured Content Server database. Its complete subtree is in scope. The
 Destination parent NodeID is an existing GX39 container; the source root is

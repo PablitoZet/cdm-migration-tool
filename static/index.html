@@ -581,12 +581,26 @@
         <strong class="text-slate-300">Fixed migration policy:</strong> Created By remains the migration service account, Owned By is resolved once per distinct source owner, and original dates and owner identity are recorded in CDM Migration Provenance. Readiness stops the process if exact identity evidence, provenance setup or an exception approval is missing.
       </div>
 
+      <div id="connection-test-result" class="hidden rounded-lg border border-slate-800 bg-slate-950/70 p-3 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div id="connection-test-summary" class="text-sm font-semibold text-slate-100">Connection test</div>
+            <div class="text-[11px] text-slate-500 mt-0.5">Checks the values currently entered in this form. Nothing is saved.</div>
+          </div>
+          <span id="connection-test-badge" class="px-2 py-1 rounded text-[10px] font-bold font-mono"></span>
+        </div>
+        <div id="connection-test-cards" class="grid grid-cols-1 md:grid-cols-2 gap-2"></div>
+        <details>
+          <summary class="text-[11px] text-slate-500 cursor-pointer">Technical details</summary>
+          <pre id="connection-test-technical" class="mt-2 max-h-52 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-2 text-[10px] text-slate-400 mono"></pre>
+        </details>
+      </div>
       <div id="profile-discovery-result" class="hidden bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs mono whitespace-pre-wrap"></div>
       <div class="flex flex-wrap justify-between gap-2 border-t border-slate-800 pt-3">
         <div class="flex gap-2">
           <button onclick="discoverConfiguredSource()" class="btn-secondary">Check source workspace</button>
           <button onclick="discoverConfiguredTarget()" class="btn-secondary">Check Cloud destination</button>
-          <button onclick="testConnections()" class="btn-secondary">Test connections</button>
+          <button onclick="testConnections()" class="btn-secondary" title="Test the values currently entered in this form without saving them">Test connections (without saving)</button>
         </div>
         <button onclick="saveProfile()" class="px-5 py-2 bg-sky-600 hover:bg-sky-500 rounded text-xs font-semibold">Save setup</button>
       </div>
@@ -1670,6 +1684,7 @@
       const storageConfigured = credentials.azure_storage_sas_url || credentials.azure_storage_sas_token;
       document.getElementById('pf-azure-sas-url').placeholder = storageConfigured ?
         'Storage access saved — paste only to change' : 'https://account.blob.core.windows.net/container?sv=...';
+      document.getElementById('connection-test-result').classList.add('hidden');
       document.getElementById('profile-discovery-result').classList.add('hidden');
       openModal('modal-profile');
     }
@@ -1790,39 +1805,148 @@
       return JSON.parse(value);
     }
 
+    function profileFormValues() {
+      const integerOrNull = field => {
+        const value = document.getElementById(field).value;
+        return value ? Number(value) : null;
+      };
+      const values = {
+        name: document.getElementById('pf-name').value.trim(),
+        workspace_title: document.getElementById('pf-name').value.trim(),
+        source_workspace_nodeid: integerOrNull('pf-source-root'),
+        target_workspace_nodeid: integerOrNull('pf-target-root'),
+        db_host: document.getElementById('pf-db-host').value.trim(),
+        db_port: 5432,
+        db_name: document.getElementById('pf-db-name').value.trim() || 'cs',
+        db_user: document.getElementById('pf-db-user').value.trim(),
+        sslmode: 'require',
+        source_cs_url: document.getElementById('pf-source-cs-url').value.trim(),
+        source_cs_user: document.getElementById('pf-source-cs-user').value.trim(),
+        ot_cloud_url: document.getElementById('pf-ot-url').value.trim(),
+        ot_cloud_user: document.getElementById('pf-ot-user').value.trim(),
+        verify_ssl: true,
+        category_mappings: jsonValue('pf-category-map'),
+        workspace_routes: jsonValue('pf-workspace-map')
+      };
+      if (editingNewProfile) values.environment_class = 'test';
+      const secrets = {
+        db_password: document.getElementById('pf-db-password').value,
+        source_cs_password: document.getElementById('pf-source-cs-password').value,
+        ot_cloud_password: document.getElementById('pf-ot-password').value,
+        azure_storage_sas_url: document.getElementById('pf-azure-sas-url').value
+      };
+      Object.entries(secrets).forEach(([key, value]) => { if (value) values[key] = value; });
+      return values;
+    }
+
+    function connectionStatusInfo(result) {
+      const status = result && result.status;
+      if (status === 'connected') {
+        return {
+          label: 'OK',
+          className: 'bg-emerald-500/15 text-emerald-300 border-emerald-700/60',
+          icon: '✓'
+        };
+      }
+      if (status === 'not_checked') {
+        return {
+          label: 'NOT CHECKED',
+          className: 'bg-slate-800 text-slate-400 border-slate-700',
+          icon: '•'
+        };
+      }
+      if (status === 'unconfigured') {
+        return {
+          label: 'NOT CONFIGURED',
+          className: 'bg-amber-500/15 text-amber-300 border-amber-700/60',
+          icon: '!'
+        };
+      }
+      return {
+        label: 'FAILED',
+        className: 'bg-rose-500/15 text-rose-300 border-rose-700/60',
+        icon: '×'
+      };
+    }
+
+    function connectionNextStep(kind, result) {
+      const status = result && result.status;
+      if (status === 'connected') {
+        if (kind === 'source' && result.read_only) {
+          return 'PostgreSQL responded in read-only mode.';
+        }
+        if (kind === 'target') {
+          return result.tls_verification === false ?
+            'Connected, but review TLS settings before continuing.' :
+            'GX39 accepted authentication and TLS verification is enabled.';
+        }
+        return 'Connection responded successfully.';
+      }
+      const error = String((result && result.error) || '');
+      if (status === 'unconfigured' || /url or credentials are missing|missing/i.test(error)) {
+        return kind === 'source' ?
+          'Complete the host, database, user and password fields.' :
+          'Complete the Cloud URL, user and password fields.';
+      }
+      if (/connection refused|timed out|timeout|no route|name or service not known/i.test(error)) {
+        return kind === 'source' ?
+          'Check VPN, PostgreSQL host and port.' :
+          'Check the GX39 address, network and HTTPS access.';
+      }
+      if (/authentication failed|http 401|http 403|password|login/i.test(error)) {
+        return 'The server rejected the login. Check the user and password.';
+      }
+      if (/certificate|ssl|tls/i.test(error)) {
+        return 'TLS verification failed. Do not disable it for production profiles.';
+      }
+      return 'Check the technical details below and correct the indicated field.';
+    }
+
+    function renderConnectionTest(data) {
+      const result = document.getElementById('connection-test-result');
+      const summary = document.getElementById('connection-test-summary');
+      const badge = document.getElementById('connection-test-badge');
+      const cards = document.getElementById('connection-test-cards');
+      const technical = document.getElementById('connection-test-technical');
+      const checks = [
+        {key: 'source_db', kind: 'source', label: 'PostgreSQL / source metadata'},
+        {key: 'target_cloud', kind: 'target', label: 'GX39 Cloud API'}
+      ];
+      const statuses = checks.map(check => data[check.key] && data[check.key].status);
+      const allConnected = statuses.every(status => status === 'connected');
+      const anyFailed = statuses.some(status => status === 'error');
+      summary.textContent = data.error ?
+        'The connection test could not start.' :
+        allConnected ? 'All connections are working.' :
+        anyFailed ? 'At least one connection failed.' :
+        'Complete the missing fields and test again.';
+      badge.className = 'px-2 py-1 rounded text-[10px] font-bold font-mono border ' +
+        (allConnected ? 'bg-emerald-500/15 text-emerald-300 border-emerald-700/60' :
+          anyFailed ? 'bg-rose-500/15 text-rose-300 border-rose-700/60' :
+            'bg-amber-500/15 text-amber-300 border-amber-700/60');
+      badge.textContent = allConnected ? 'READY' : anyFailed ? 'ACTION NEEDED' : 'INCOMPLETE';
+      cards.innerHTML = checks.map(check => {
+        const item = data[check.key] || {status: 'not_checked'};
+        const info = connectionStatusInfo(item);
+        return `
+          <div class="rounded-lg border border-slate-800 bg-slate-900/80 p-3 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <strong class="text-xs text-slate-100">${escapeHtml(check.label)}</strong>
+              <span class="px-2 py-0.5 rounded border text-[10px] font-bold ${info.className}">${info.icon} ${info.label}</span>
+            </div>
+            <div class="text-[11px] text-slate-300">${escapeHtml(connectionNextStep(check.kind, item))}</div>
+            ${item.user ? `<div class="text-[10px] text-slate-500 mono">User: ${escapeHtml(item.user)}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+      technical.textContent = JSON.stringify(data, null, 2);
+      result.classList.remove('hidden');
+    }
+
     async function saveProfile() {
       try {
         const id = document.getElementById('pf-id').value.trim().toLowerCase();
-        const integerOrNull = field => {
-          const value = document.getElementById(field).value;
-          return value ? Number(value) : null;
-        };
-        const values = {
-          name: document.getElementById('pf-name').value.trim(),
-          workspace_title: document.getElementById('pf-name').value.trim(),
-          source_workspace_nodeid: integerOrNull('pf-source-root'),
-          target_workspace_nodeid: integerOrNull('pf-target-root'),
-          db_host: document.getElementById('pf-db-host').value.trim(),
-          db_port: 5432,
-          db_name: document.getElementById('pf-db-name').value.trim() || 'cs',
-          db_user: document.getElementById('pf-db-user').value.trim(),
-          sslmode: 'require',
-          source_cs_url: document.getElementById('pf-source-cs-url').value.trim(),
-          source_cs_user: document.getElementById('pf-source-cs-user').value.trim(),
-          ot_cloud_url: document.getElementById('pf-ot-url').value.trim(),
-          ot_cloud_user: document.getElementById('pf-ot-user').value.trim(),
-          verify_ssl: true,
-          category_mappings: jsonValue('pf-category-map'),
-          workspace_routes: jsonValue('pf-workspace-map')
-        };
-        if (editingNewProfile) values.environment_class = 'test';
-        const secrets = {
-          db_password: document.getElementById('pf-db-password').value,
-          source_cs_password: document.getElementById('pf-source-cs-password').value,
-          ot_cloud_password: document.getElementById('pf-ot-password').value,
-          azure_storage_sas_url: document.getElementById('pf-azure-sas-url').value
-        };
-        Object.entries(secrets).forEach(([key, value]) => { if (value) values[key] = value; });
+        const values = profileFormValues();
         const res = await fetch('/api/profiles/' + encodeURIComponent(id), {
           method: 'PUT', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({values: values, make_active: editingNewProfile})
@@ -1869,7 +1993,25 @@
     }
 
     async function testConnections() {
-      showDiscoveryResult(await fetchConnectionStatus());
+      const id = document.getElementById('pf-id').value.trim().toLowerCase();
+      try {
+        if (!id) throw new Error('Enter an internal profile ID before testing connections.');
+        const res = await fetch('/api/profiles/' + encodeURIComponent(id) + '/test-connections', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({values: profileFormValues()})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `Connection test failed (${res.status}).`);
+        renderConnectionTest(data);
+      } catch (error) {
+        renderConnectionTest({
+          status: 'error',
+          error: error.message,
+          source_db: {status: 'not_checked'},
+          target_cloud: {status: 'not_checked'}
+        });
+      }
     }
 
     function setWorkflowAction(id, enabled, enabledTitle, blockedReason) {
