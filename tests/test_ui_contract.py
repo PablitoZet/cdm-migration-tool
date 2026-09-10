@@ -73,7 +73,7 @@ class OperatorUiContractTests(unittest.TestCase):
         self.assertIn('The app creates the selected source root inside it.', self.html)
         self.assertNotIn('R&amp;D workspace DataID', self.html)
         self.assertNotIn('Pilot setup', self.html)
-        self.assertNotIn('owner_mappings', self.html)
+        self.assertIn('id="prov-owner-mappings"', self.html)
 
     def test_unconfigured_scope_never_displays_example_identifiers(self):
         self.assertIn('id="scope-node-badge">not configured</strong>', self.html)

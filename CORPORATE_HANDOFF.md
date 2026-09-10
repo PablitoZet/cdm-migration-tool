@@ -61,6 +61,14 @@ repository.
   `AuthorizationFailure`; container identity/network policy also remains to be
   resolved. Actual Azure binary reads and the production source schema remain
   unqualified.
+- Corporate TEST confirmed that user owners are stored as negative
+  `DTree.OwnerID` values while the corresponding `KUAF.ID` is positive. Owner
+  extraction resolves the absolute KUAF lookup ID while retaining the original
+  signed source OwnerID in the manifest and provenance. This KUAF schema uses
+  `Name` as the login and `FirstName`/`LastName` as display-name components.
+  GX39 CE 25.4 member searches return identity under `data.properties`, with
+  `name`, `name_formatted`, `business_email`/`personal_email` and `deleted`;
+  the client normalizes that shape before exact login/email resolution.
 - The first real GX39 DEV Pilot created and verified all nine folders, then
   GX39/WAF reset every ordinary document create because Requests emitted both
   `Content-Length` and `Transfer-Encoding: chunked` for the custom multipart
@@ -93,8 +101,9 @@ repository.
   `external_modify_date`, but these do not provide system-date fidelity.
 - The current checkout implements the agreed replacement contract:
   `Created By` remains the migration service account; `Owned By` is resolved
-  from exact active target identity evidence once per distinct source KUAF
-  owner; and original source dates, owner identity and resolution status are
+  from the exact active target e-mail once per distinct source KUAF owner; cloud
+  member IDs and logins are tenant-local and are not compared with on-premise
+  values; and original source dates, owner identity and resolution status are
   stored in the dedicated `CDM Migration Provenance` category. Documents also
   carry ordered provenance rows for every source version.
 - Unresolved, ambiguous, deactivated or status-unknown owners fail Readiness
@@ -133,7 +142,7 @@ commercial migration-product UX.
 - **Destination parent NodeID** may identify any approved GX39 container that
   accepts child objects. The selected source root is created beneath it.
 - `Created By` remains the migration service account; `Owned By` is assigned
-  from immutable exact owner resolutions. Original source dates and owner
+  from immutable exact e-mail owner resolutions. Original source dates and owner
   identity are preserved in `CDM Migration Provenance`.
 - Migrated objects inherit the approved permissions of the destination.
 - Duplicate protection uses a dedicated indexed GX39 text attribute such as

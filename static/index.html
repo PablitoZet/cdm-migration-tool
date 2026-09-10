@@ -106,15 +106,15 @@
         </div>
 
         <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
-          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Migrated</div>
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Verified</div>
           <div class="text-xl font-bold text-emerald-400 mt-0.5" id="kpi-success">0</div>
           <div class="text-[10px] text-emerald-400 font-mono mt-0.5" id="kpi-pct-txt">0.0%</div>
         </div>
 
         <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
-          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Pending</div>
+          <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Needs completion</div>
           <div class="text-xl font-bold text-amber-400 mt-0.5" id="kpi-pending">0</div>
-          <div class="text-[10px] text-slate-500 mt-0.5">Failed: <strong id="kpi-failed" class="text-rose-400">0</strong></div>
+          <div class="text-[10px] text-slate-500 mt-0.5">Failed: <strong id="kpi-failed" class="text-rose-400">0</strong> · Created: <strong id="kpi-created" class="text-sky-400">0</strong></div>
         </div>
 
         <div class="bg-slate-950/70 border border-slate-800/80 rounded-lg p-3">
@@ -637,8 +637,8 @@
       <p class="text-xs text-slate-300 leading-relaxed">Ask the GX39 administrator to create the clearly named <strong>CDM Migration Provenance</strong> category. Enter the returned category ID and attribute keys exactly as qualified for ordinary folders, documents, versions and each Business Workspace route.</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
         <label>Category ID<input id="prov-category-id" type="number" min="1" class="field" placeholder="Example: 12345"></label>
-        <label>Fallback Member ID<input id="prov-fallback-id" type="number" min="1" class="field" placeholder="Only for approved exceptions"></label>
-        <label>Fallback login<input id="prov-fallback-login" class="field" placeholder="Example: cdm-legacy-owner"></label>
+        <label>Fallback Member ID<input id="prov-fallback-id" type="number" min="1" class="field" placeholder="Leave empty for migration account"></label>
+        <label>Fallback login<input id="prov-fallback-login" class="field" placeholder="Defaults to migration account login"></label>
         <label class="md:col-span-2">Fallback email<input id="prov-fallback-email" class="field" placeholder="Exact GX39 email, if configured"></label>
         <label>Fallback display name<input id="prov-fallback-display" class="field" placeholder="CDM Legacy Owner"></label>
       </div>
@@ -652,6 +652,10 @@
           <textarea id="prov-version-keys" rows="8" class="field mono">{}</textarea>
         </label>
       </div>
+      <label class="block text-xs">Optional manual owner mappings
+        <span class="block text-[10px] text-slate-500 mt-1">JSON object: source OwnerID → GX39 Login Name. Leave empty to use automatic matching or the migration-account fallback.</span>
+        <textarea id="prov-owner-mappings" rows="3" class="field mono">{}</textarea>
+      </label>
       <div class="flex justify-end gap-2 border-t border-slate-800 pt-3">
         <button onclick="closeModal('modal-provenance')" class="btn-secondary">Cancel</button>
         <button onclick="saveProvenance()" class="px-5 py-2 bg-amber-600 hover:bg-amber-500 rounded text-xs font-semibold">Save provenance setup</button>
@@ -871,7 +875,7 @@
 
     async function fetchStatus() {
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch('/api/status?deep=true');
         const data = await res.json();
 
         currentEnv = data.active_environment;
@@ -880,7 +884,9 @@
         latestInventory = data.manifest_stats || {};
         latestFreeze = data.freeze || {};
         updateEnvUI(currentEnv);
-        updateSafetyGates(data.parity, data.freeze, data.manifest_stats);
+        const activeParity = data.workflow && data.workflow.successful_modes &&
+          data.workflow.successful_modes.includes('pilot') ? data.parity : data.pilot_parity;
+        updateSafetyGates(activeParity, data.freeze, data.manifest_stats);
         updateWorkflowControls();
 
         // Keep the source and target scope identifiers visible without duplicating the active profile.
@@ -905,8 +911,10 @@
         document.getElementById('kpi-folders').textContent = t.total_folders.toLocaleString();
         document.getElementById('kpi-docs').textContent = t.total_docs.toLocaleString();
         document.getElementById('kpi-success').textContent = t.success_nodes.toLocaleString();
-        document.getElementById('kpi-pending').textContent = t.pending_nodes.toLocaleString();
+        document.getElementById('kpi-pending').textContent = t.metadata_pending_nodes
+          ? t.metadata_pending_nodes.toLocaleString() : t.pending_nodes.toLocaleString();
         document.getElementById('kpi-failed').textContent = t.failed_nodes.toLocaleString();
+        document.getElementById('kpi-created').textContent = t.remote_committed_nodes.toLocaleString();
 
         document.getElementById('kpi-pct-txt').textContent = `${t.progress_percent}%`;
         document.getElementById('progress-percent').textContent = `${t.progress_percent}%`;
@@ -1104,6 +1112,8 @@
             statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">SUCCESS</span>`;
           } else if (item.status === 'FAILED') {
             statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30" title="${item.error_msg || ''}">FAILED</span>`;
+          } else if (item.status === 'PARTIAL') {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30" title="${item.error_msg || ''}">CREATED · INCOMPLETE</span>`;
           }
 
           let integrityBadge = `<span class="text-slate-600 text-[10px]">-</span>`;
@@ -1721,6 +1731,7 @@
       setValue('prov-fallback-login', fallback.login || fallback.username);
       setValue('prov-fallback-email', fallback.email);
       setValue('prov-fallback-display', fallback.display_name || fallback.name);
+      setValue('prov-owner-mappings', JSON.stringify(profile.owner_mappings || {}, null, 2));
       openModal('modal-provenance');
     }
 
@@ -1740,7 +1751,8 @@
           provenance_category_id: category ? Number(category) : null,
           provenance_attribute_keys: jsonValue('prov-node-keys'),
           provenance_version_attribute_keys: jsonValue('prov-version-keys'),
-          owner_fallback: fallback
+          owner_fallback: fallback,
+          owner_mappings: jsonValue('prov-owner-mappings')
         };
         const res = await fetch('/api/profiles/' + encodeURIComponent(currentEnv), {
           method: 'PUT', headers: {'Content-Type': 'application/json'},
@@ -2115,7 +2127,9 @@
     }
 
     async function showParityDetails() {
-      const res = await fetch('/api/compatibility');
+      const stage = latestWorkflow && latestWorkflow.successful_modes &&
+        latestWorkflow.successful_modes.includes('pilot') ? 'full' : 'pilot';
+      const res = await fetch('/api/compatibility?stage=' + stage);
       latestParity = await res.json();
       const container = document.getElementById('parity-checks');
       container.innerHTML = '';
@@ -2140,6 +2154,12 @@
         HISTORICAL_AUDIT_SCOPE: 'Historical audit scope',
         PERSONAL_STATE_SCOPE: 'Personal UI preferences'
       };
+      const intro = document.createElement('div');
+      intro.className = 'p-3 rounded-lg border border-sky-900 bg-sky-950/20 text-xs text-slate-300';
+      intro.innerHTML = stage === 'pilot' ?
+        '<strong class="text-sky-300">Pilot readiness</strong><br>Green items are checked now. Amber items are intentionally deferred until after the Pilot, when they can be tested on migrated objects.' :
+        '<strong class="text-sky-300">Full cutover readiness</strong><br>Green items are verified. Amber items still require operator qualification before Full Cutover.';
+      container.appendChild(intro);
       (latestParity.checks || []).forEach(check => {
         const row = document.createElement('div');
         const pass = check.status === 'PASS';

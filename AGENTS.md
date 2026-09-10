@@ -64,6 +64,46 @@ Update both in the same change.
 The pre-refactor architecture dossier and legacy operator SOP were intentionally
 removed. Do not restore or cite them.
 
+## 3a. OpenText API verification
+
+Every OpenText API operation must be checked against the official OpenText
+Developer documentation before implementation or change. Do not infer an
+endpoint, HTTP method, request body, response shape or retry behavior from a
+similar-looking URL or from memory.
+
+Required references:
+
+- [OpenText APIs](https://developer.opentext.com/apis) — complete API catalog.
+- [Content Server 25.4 APIs](https://developer.opentext.com/ce/products/content-management/apis/content-server-25-4-0) — target Content Server API reference for this repository.
+
+For each tenant-specific operation, record the documented contract and qualify
+it against GX39 TEST before enabling the operation in a migration stage. If the
+documentation and tenant behavior differ, isolate the adaptation in
+`engine/client.py`, keep the readiness gate closed, and record the discrepancy
+as a finding. Never ship an assumed OpenText endpoint for a target write.
+
+## 3b. Tenant configuration must always be reflected in the runbook
+
+Any GX39/xECM tenant-side configuration that this tool depends on to function
+correctly — categories, attribute keys, attribute types (`datetime` vs `date`),
+the duplicate-protection attribute, the migration service account, destination
+ACLs, Business Workspace type/template routes, or any other fixed tenant
+setting discovered during qualification — is *not* stored in this repository,
+in `config.json`, or in the SQLite state database. It only exists in the
+target tenant's admin configuration and in
+`DEPLOYMENT_AND_QUALIFICATION.md` section 5a ("Required GX39 tenant
+configuration").
+
+Whenever an agent (or the operator, with agent assistance) creates, changes or
+qualifies such a tenant setting — including changing an attribute's type,
+adding a category field, rotating the service account, or discovering a new
+required setting via a finding — update section 5a in the same change/session.
+Do not leave this only in a session's findings list or chat history: findings
+are session-scoped and are not a substitute for the runbook. A missing or
+stale section 5a means the production tenant cannot be reproduced 1:1 from
+what was qualified in TEST, which blocks Full Cutover per section 15 of the
+deployment runbook.
+
 ## 4. Non-negotiable safety invariants
 
 The following rules are mandatory:
@@ -104,7 +144,8 @@ Keep ordinary Migration Setup small and understandable.
 - `source_root_maps_to_target` is fixed to `false` for this tool.
 - `Created By` remains the GX39 migration service account and is verified by
   read-back. `Owned By` is assigned from one exact, active GX39-user resolution
-  per distinct source KUAF owner.
+  by source-owner e-mail per distinct source KUAF owner. Cloud member IDs and
+  logins are tenant-local and are not compared with on-premise IDs or logins.
 - Original source dates and owner identity are preserved in the dedicated
   `CDM Migration Provenance` category. GX39 system create/modify dates remain
   target-generated and are not treated as writable source fields.
@@ -120,6 +161,8 @@ Keep ordinary Migration Setup small and understandable.
 - Category, owner and Business Workspace mappings are exception fields. Do not
   expose extra strategies or tenant internals unless Readiness can name the
   exact required operator action.
+- For unresolved owners, the operator may use an explicit source OwnerID to
+  cloud Login Name mapping, or approve the migration-account fallback.
 
 Profiles carry an internal `environment_class` (`sandbox`, `test`, or
 `production`). Existing production profiles retain production safety gates.
@@ -150,12 +193,22 @@ unconditional POST retries.
 Each execution has an immutable UUID `run_id` and separate `run_items`.
 
 ```text
-READY -> CLAIMED -> REMOTE_COMMITTED -> METADATA_APPLIED -> VERIFIED
+READY -> CLAIMED -> REMOTE_COMMITTED -> METADATA_APPLIED -> OWNER_PENDING -> VERIFIED
                   \-> RETRY_WAIT -> CLAIMED
                   \-> FAILED_TERMINAL
 
 Dry Run: READY -> CLAIMED -> SIMULATED
 ```
+
+Target owner reassignment is executed in a dedicated, run-wide final phase
+(`OWNER`), after every container, document and reference in the run has been
+created (`OWNER_PENDING` items are re-claimed and moved to `VERIFIED` once
+`assign_owner` and its read-back succeed). This ordering is mandatory: GX39
+containers inherit ACL from their parent at the moment a child is created, so
+reassigning a container's owner before all of its descendants exist can strip
+the migration service account's edit rights from ACLs inherited later,
+causing cascading `HTTP 500 Insufficient permissions` failures. Never move
+owner reassignment back into per-object processing.
 
 Claims use leases. Large multipart uploads persist upload key, next part, part
 size, bytes and hashes. `Run history` offers `Resume interrupted run` only for

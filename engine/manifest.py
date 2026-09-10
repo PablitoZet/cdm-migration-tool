@@ -1148,13 +1148,19 @@ class ManifestStore:
                     ItemState.REMOTE_COMMITTED, ItemState.METADATA_APPLIED,
                 ),
             )
+            # Explicit operator-initiated recovery (this method) is already gated by
+            # PreflightAuditor + identity/config-fingerprint validation in
+            # MigrationPipeline.recover_run before this is ever reached. Once an
+            # operator has explicitly requested recovery, a FAILED_TERMINAL item is
+            # eligible for retry regardless of which error code caused the
+            # terminal failure (e.g. a since-fixed client bug), because the
+            # duplicate-protection marker prevents any unsafe duplicate create.
             conn.execute(
                 """UPDATE run_items SET state=?,attempt_count=0,lease_owner=NULL,lease_expires_at=NULL,
                    next_attempt_at=?,updated_at=?
-                   WHERE run_id=? AND state=? AND last_error_code IN (?,?)""",
+                   WHERE run_id=? AND state=?""",
                 (
                     ItemState.RETRY_WAIT, now, now, run_id, ItemState.FAILED_TERMINAL,
-                    "RetryableMigrationError", "AmbiguousRemoteCommit",
                 ),
             )
             conn.execute(
@@ -1191,6 +1197,41 @@ class ManifestStore:
                     run_id, phase, ItemState.READY, ItemState.RETRY_WAIT, now,
                     ItemState.CLAIMED, now, ItemState.SIMULATED,
                 ),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """UPDATE run_items SET state=?,lease_owner=?,lease_expires_at=?,attempt_count=attempt_count+1,
+                   updated_at=? WHERE run_id=? AND source_id=?""",
+                (ItemState.CLAIMED, worker_id, expires, now, run_id, row["source_id"]),
+            )
+            result = dict(row)
+            result.update({"state": str(ItemState.CLAIMED), "lease_owner": worker_id, "lease_expires_at": expires})
+            return result
+
+    def claim_next_owner(
+        self, run_id: str, worker_id: str, *, lease_seconds: int = 300,
+    ) -> dict[str, Any] | None:
+        """Claim the next item awaiting final owner reassignment (OWNER phase).
+
+        Mirrors claim_next but matches ItemState.OWNER_PENDING as the initial
+        claimable state instead of READY, since items enter this phase
+        already created and metadata-applied (see MigrationPipeline._finish_item).
+        """
+        now = utcnow()
+        expires = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat(timespec="milliseconds")
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT i.*,n.* FROM run_items i JOIN manifest_nodes n USING(source_id)
+                WHERE i.run_id=? AND i.phase=? AND (
+                    i.state=? OR
+                    (i.state=? AND i.next_attempt_at<=?) OR
+                    (i.state=? AND i.lease_expires_at<?)
+                )
+                ORDER BY n.depth,n.source_id LIMIT 1
+                """,
+                (run_id, "OWNER", ItemState.OWNER_PENDING, ItemState.RETRY_WAIT, now, ItemState.CLAIMED, now),
             ).fetchone()
             if not row:
                 return None
@@ -1247,9 +1288,14 @@ class ManifestStore:
                 """UPDATE run_items SET state=?,target_id=COALESCE(?,target_id),
                    target_parent_id=COALESCE(?,target_parent_id),
                    bytes_transferred=COALESCE(?,bytes_transferred),lease_owner=NULL,lease_expires_at=NULL,
-                   next_attempt_at=NULL,last_error_code=NULL,last_error=NULL,updated_at=?
+                   next_attempt_at=NULL,last_error_code=NULL,last_error=NULL,updated_at=?,
+                   phase=CASE WHEN ?=? THEN ? ELSE phase END
                    WHERE run_id=? AND source_id=?""",
-                (state, target_id, target_parent_id, bytes_transferred, now, run_id, source_id),
+                (
+                    state, target_id, target_parent_id, bytes_transferred, now,
+                    state, ItemState.OWNER_PENDING, "OWNER",
+                    run_id, source_id,
+                ),
             )
 
     def commit_mapping(
@@ -1466,6 +1512,16 @@ class ManifestStore:
                 (run_id,),
             ).fetchall()
             counts = {row["state"]: row["n"] for row in rows}
+            remote = conn.execute(
+                "SELECT COUNT(*) n FROM run_items WHERE run_id=? AND target_id IS NOT NULL",
+                (run_id,),
+            ).fetchone()
+            pending_metadata = conn.execute(
+                """SELECT COUNT(*) n FROM run_items
+                   WHERE run_id=? AND target_id IS NOT NULL
+                   AND state NOT IN (?, ?, ?)""",
+                (run_id, ItemState.VERIFIED, ItemState.SIMULATED, ItemState.SKIPPED),
+            ).fetchone()
             total = sum(counts.values())
             terminal = sum(counts.get(str(s), 0) for s in (
                 ItemState.VERIFIED, ItemState.SIMULATED, ItemState.SKIPPED, ItemState.FAILED_TERMINAL
@@ -1475,6 +1531,8 @@ class ManifestStore:
                 "state_counts": counts,
                 "completed_nodes": terminal,
                 "failed_nodes": counts.get(ItemState.FAILED_TERMINAL, 0),
+                "remote_committed_nodes": int(remote["n"]) if remote else 0,
+                "metadata_pending_nodes": int(pending_metadata["n"]) if pending_metadata else 0,
                 "verified_nodes": counts.get(ItemState.VERIFIED, 0),
                 "simulated_nodes": counts.get(ItemState.SIMULATED, 0),
                 "transferred_bytes": sum(row["b"] for row in rows),

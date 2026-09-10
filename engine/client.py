@@ -205,14 +205,18 @@ class OpenTextCloudClient:
         )
         self.member_lookup_fields = getter("member_lookup_fields")
         self.owner_assignment_endpoint = str(
-            getter("owner_assignment_endpoint", "/api/v2/nodes/{target_id}/owner")
+            getter("owner_assignment_endpoint", "/api/v2/nodes/{target_id}/permissions/owner")
         )
-        self.owner_assignment_field = str(getter("owner_assignment_field", "owner_user_id"))
+        self.owner_assignment_field = str(getter("owner_assignment_field", "right_id"))
+        self.owner_assignment_permissions = list(getter("owner_assignment_permissions", []))
         self.provenance_category_id = getter("provenance_category_id")
         self.provenance_attribute_keys = getter("provenance_attribute_keys", {}) or {}
         self.provenance_version_attribute_keys = getter(
             "provenance_version_attribute_keys", {}
         ) or {}
+        self.provenance_add_endpoint = str(
+            getter("provenance_add_endpoint", "/api/v2/nodes/{target_id}/categories")
+        )
         self.provenance_endpoint = str(
             getter("provenance_endpoint", "/api/v2/nodes/{target_id}/categories/{category_id}")
         )
@@ -372,7 +376,7 @@ class OpenTextCloudClient:
         response = self._request(
             "GET", f"/api/v2/nodes/{target_id}"
             "?fields=properties{id,name,type,parent_id,size,description,create_date,modify_date,"
-            "owner_id,owner_user_id,creator_id,created_by,owner,creator}"
+            "owner_id,owner_user_id,create_user_id,owner,creator}"
         )
         return response.json().get("results", {}).get("data", {}).get("properties", {})
 
@@ -411,7 +415,10 @@ class OpenTextCloudClient:
         endpoint = self.owner_assignment_endpoint.format(
             target_id=int(target_id), member_id=int(member_id),
         )
-        body = {self.owner_assignment_field: int(member_id)}
+        body = {
+            "permissions": self.owner_assignment_permissions,
+            self.owner_assignment_field: int(member_id),
+        }
         self._request("PUT", endpoint, expected=(200, 201, 204), data={"body": json.dumps(body)})
 
     def read_owner(self, target_id: int) -> dict[str, Any]:
@@ -437,7 +444,7 @@ class OpenTextCloudClient:
             if identity["id"] is not None:
                 member = self.get_member(int(identity["id"]))
                 return {**member, **member_identity(member)}
-        creator_id = _first_value(properties, "creator_id", "created_by", "created_by_id")
+        creator_id = _first_value(properties, "create_user_id", "creator_id", "created_by", "created_by_id")
         if creator_id is None:
             raise TerminalMigrationError(f"Target {target_id} has no readable creator")
         result: dict[str, Any] = {"id": int(creator_id), "member_id": int(creator_id)}
@@ -773,20 +780,34 @@ class OpenTextCloudClient:
         category_id = self.provenance_category_id
         if not category_id:
             raise TerminalMigrationError("provenance_category_id is required")
-        payload = {
-            "category_id": int(category_id),
-            **mapped_provenance_payload(node_values, self.provenance_attribute_keys),
-        }
+        attribute_values = mapped_provenance_payload(node_values, self.provenance_attribute_keys)
         if version_values is not None:
-            payload[self.provenance_versions_field] = [
+            attribute_values[self.provenance_versions_field] = [
                 mapped_provenance_payload(row, self.provenance_version_attribute_keys)
                 for row in version_values
             ]
+        # GX39's Content Server REST API distinguishes first-time category
+        # application (POST /v2/nodes/{id}/categories, body includes
+        # category_id) from updating an already-applied category
+        # (PUT /v2/nodes/{id}/categories/{category_id}/, body must NOT include
+        # category_id). Attempt POST first; if the category is already on the
+        # node, fall back to PUT so retries/recovery runs remain idempotent.
+        add_endpoint = self.provenance_add_endpoint.format(target_id=int(target_id))
+        add_payload = {"category_id": int(category_id), **attribute_values}
+        try:
+            self._request(
+                "POST", add_endpoint, expected=(200, 201, 204),
+                data={"body": json.dumps(add_payload)},
+            )
+            return
+        except TerminalMigrationError as exc:
+            if "already exists" not in str(exc):
+                raise
         endpoint = self.provenance_endpoint.format(
             target_id=int(target_id), category_id=int(category_id),
         )
         self._request(
-            "PUT", endpoint, expected=(200, 201, 204), data={"body": json.dumps(payload)},
+            "PUT", endpoint, expected=(200, 201, 204), data={"body": json.dumps(attribute_values)},
         )
 
     def read_provenance(self, target_id: int) -> dict[str, Any]:
@@ -802,7 +823,37 @@ class OpenTextCloudClient:
             payload = payload.get("data", payload)
         if not isinstance(payload, dict):
             raise TerminalMigrationError(f"Provenance read-back for {target_id} is not an object")
-        return payload
+        return self._reconstruct_version_rows(payload)
+
+    def _reconstruct_version_rows(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild the nested version-rows list GX39 flattens in category read-back.
+
+        GX39 returns multi-row/set category values as flat
+        "{category}_{set}_{row}_{attr}" keys (for example "156923_11_1_12"),
+        possibly nested under a wrapper key such as "categories", rather than
+        as a nested list under the set's own key. This walks every dict level
+        of the payload and, wherever such flat keys are found, reconstructs
+        the nested "version rows" list expected by the read-back verifier.
+        """
+        versions_field = self.provenance_versions_field
+        row_prefix = f"{versions_field}_"
+        rows: dict[int, dict[str, Any]] = {}
+        result: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key.startswith(row_prefix):
+                remainder = key[len(row_prefix):]
+                row_str, sep, attr_id = remainder.partition("_")
+                if sep and row_str.isdigit():
+                    row_num = int(row_str)
+                    rows.setdefault(row_num, {})[f"{versions_field}_x_{attr_id}"] = value
+                    continue
+            if isinstance(value, dict):
+                result[key] = self._reconstruct_version_rows(value)
+                continue
+            result[key] = value
+        if rows:
+            result[versions_field] = [rows[num] for num in sorted(rows)]
+        return result
 
     def apply_permission_policy(self, target_id: int, policy: list[dict[str, Any]]) -> None:
         for operation in policy:
@@ -904,6 +955,8 @@ def _extract_member_rows(payload: Any) -> list[dict[str, Any]]:
         results = value.get("results", value)
         if isinstance(results, dict):
             value = results.get("data", results.get("members", results.get("users", results)))
+        else:
+            value = results
     if isinstance(value, dict):
         value = value.get("members", value.get("users", [value]))
     if not isinstance(value, list):
@@ -914,7 +967,20 @@ def _extract_member_rows(payload: Any) -> list[dict[str, Any]]:
             continue
         data = item.get("data", item)
         if isinstance(data, dict):
-            rows.append(data)
+            properties = data.get("properties")
+            if isinstance(properties, dict):
+                normalized = dict(properties)
+                normalized.setdefault("login", properties.get("name"))
+                normalized.setdefault(
+                    "email",
+                    properties.get("business_email") or properties.get("personal_email"),
+                )
+                normalized.setdefault("display_name", properties.get("name_formatted"))
+                if properties.get("deleted") is not None:
+                    normalized.setdefault("active", not bool(properties["deleted"]))
+                rows.append(normalized)
+            else:
+                rows.append(data)
     return rows
 
 

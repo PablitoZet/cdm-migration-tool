@@ -172,6 +172,74 @@ The same target tenant attribute can be reused by profiles when its category is
 valid for their migrated types. Namespace values keep profile identities
 separate.
 
+## 5a. Required GX39 tenant configuration (must be reproduced 1:1 per environment)
+
+The migration only works if the target GX39 tenant has the following objects
+configured *before* Dry Run/Pilot/Cutover. These are tenant-side admin settings,
+not tool configuration, and are **not exported by any release ZIP or state
+backup**. Every new tenant (a fresh TEST tenant, a tenant reset, or the
+production tenant) needs this section re-applied and re-verified before any
+Pilot is attempted there. Treat this list as the single source of truth and
+update it immediately whenever a category, attribute or attribute type changes
+in any qualified tenant — do not let this drift from what is actually deployed.
+
+1. **Duplicate-protection attribute** (see section 5): one indexed text
+   attribute (`Text: Field`, length 254, one locked row, `Required`,
+   `Show in Search`), applicable to every migrated object type. Record its
+   `categoryID_attributeID` key in the profile's Duplicate protection field.
+
+2. **`CDM Migration Provenance` category**: one category applicable to every
+   migrated object type (folders, documents, Business Workspaces), containing:
+   - Node-level fields: source DataID (text), source created/modified date
+     (datetime — see point 4), source owner ID/login/email/display name
+     (text), source owner resolution status (text), source system (text).
+   - One ordered multi-row/set field for document version provenance,
+     containing per-row: version number (number), version created date,
+     version modified date, version file date (all datetime — see point 4).
+   - Record the category ID and every field/attribute key
+     (`categoryID_attributeID`, and for the set the row-column keys) in the
+     profile's Configure provenance dialog, including the set's own field key
+     (`provenance_versions_field`) — this is a distinct value from the
+     individual row-column keys and is easy to forget (see finding #8).
+   - GX39 TEST reference values currently qualified (test tenant only, will
+     differ per tenant — do not assume they apply to production without
+     re-reading the category from the production tenant admin UI):
+     category `156923`; node-level fields `156923_2`..`156923_10`; version set
+     field key `156923_11`; version row-column keys
+     `156923_11_x_12` (version number), `156923_11_x_13` (version created
+     date), `156923_11_x_14` (version modified date), `156923_11_x_15`
+     (version file date).
+
+3. **GX39 migration service account**: an active account used as `Created By`
+   for every migrated object and as the object owner until the final OWNER
+   phase reassigns it to the resolved target owner. Its exact login/email must
+   be entered in the profile so the client can verify creator read-back.
+
+4. **Attribute type for every date/time provenance field must be `datetime`,
+   never `date`.** GX39 silently truncates `date`-typed attributes to midnight
+   on write, which is indistinguishable from a code bug during a Pilot (see
+   findings #18 and #20 — this cost significant investigation time before the
+   category schema was found to be the real cause). When creating or
+   reviewing the `CDM Migration Provenance` category (and any multi-row/set
+   version fields inside it) in GX39 category admin, confirm every
+   created/modified/file-date attribute is `datetime`, not `date`, by checking
+   `/api/v1/forms/nodes/categories/create` (or the equivalent update form) for
+   `"type"` on that attribute before running a Pilot. Re-verify this after any
+   category recreation, tenant refresh, or migration to a new GX39 tenant.
+
+5. **Destination ACL**: the destination parent NodeID must have the intended
+   access already configured (approved permissions/role membership) before the
+   Pilot, since migrated objects inherit it — the tool does not create ACLs.
+
+6. **Business Workspace types/templates**: every Business Workspace subtype
+   (for example 848) present in the migration scope must have its target
+   type/template route already created and reachable in the destination
+   tenant, with roles behaving as expected.
+
+Corporate-machine qualification (`DEPLOYMENT_AND_QUALIFICATION.md` section 8)
+must re-confirm points 1-6 explicitly for the production GX39 tenant before
+Full Cutover; do not assume TEST tenant configuration was copied correctly.
+
 ## 6. Scan and offline readiness
 
 Select the correct profile and click **1. Scan Source Workspace**. The scan uses
@@ -207,13 +275,14 @@ requests them:
 - `Created By` is the GX39 migration service account; enter its exact login and,
   when available, email for online identity read-back.
 - `Owned By` is resolved automatically once per distinct source KUAF owner.
-  The tool uses exact trimmed, case-insensitive login/email equality and never
+  The tool uses exact trimmed, case-insensitive equality between the source
+  e-mail and the GX39 Login Name (which is an e-mail in this tenant) and never
   accepts display names, filenames or same-name objects as identity evidence.
-- Do not create per-file or per-owner numeric mappings. An unresolved,
-  ambiguous, deactivated or status-unknown source owner blocks the run unless
-  the administrator provides one exact active fallback principal, such as
-  `CDM Legacy Owner`, and the operator approves the displayed exception digest
-  and change record at the run boundary.
+- If automatic matching fails, the operator may provide an optional
+  `owner_mappings` entry keyed by source owner ID and cloud Login Name.
+  Otherwise the default fallback is the configured GX39 migration account.
+  The operator explicitly chooses manual mappings or that fallback at the run
+  boundary; the choice is recorded in provenance.
 - The GX39 administrator must provide the dedicated `CDM Migration Provenance`
   category ID and attribute keys. Its labels must explicitly identify
   `Original Source` and `(Pre-Migration)` values for the source DataID, created
@@ -256,7 +325,7 @@ cases for:
 7. token expiration between multipart parts;
 8. a deliberately lost/ambiguous create response and duplicate reconciliation;
 9. first version and subsequent versions;
-10. exact owner lookup for login/email, service-account creator read-back and
+10. exact owner lookup for e-mail, service-account creator read-back and
     `Owned By` assignment on ordinary folders/documents;
 11. `CDM Migration Provenance` applicability, date/time normalization and
     read-back for ordinary objects;

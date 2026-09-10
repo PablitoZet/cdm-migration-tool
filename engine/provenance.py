@@ -77,7 +77,7 @@ class OwnerResolution:
 
     @property
     def is_exception(self) -> bool:
-        return self.resolution_status != "EXACT"
+        return self.resolution_status not in {"EXACT", "APPROVED_MAPPING"}
 
 
 def normalized_identity(value: Any) -> str | None:
@@ -168,7 +168,7 @@ def exception_set_digest(resolutions: Sequence[OwnerResolution | Mapping[str, An
     for resolution in resolutions:
         if not isinstance(resolution, OwnerResolution):
             resolution = owner_resolution_from_row(resolution)
-        if resolution.resolution_status == "EXACT":
+        if resolution.resolution_status in {"EXACT", "APPROVED_MAPPING"}:
             continue
         entries.append((
             resolution.source_owner_id,
@@ -274,59 +274,73 @@ def resolve_owner_identity(
             reason=reason, resolved_at=now,
         )
 
-    identifiers = [
-        ("login", owner.login),
-        ("email", owner.email),
-    ]
-    matched: list[dict[str, Any]] = []
-    for key, value in identifiers:
-        if not value:
-            continue
-        candidates = lookup(key, value)
-        member, failure = _unique_active_member(candidates, identity_key=key, identity_value=value)
-        if failure:
-            return OwnerResolution(
-                owner.source_owner_id, owner.fingerprint, None, "UNRESOLVED",
-                reason=(
-                    "AMBIGUOUS"
-                    if failure == "AMBIGUOUS"
-                    else "STATUS_UNKNOWN"
-                    if failure == "STATUS_UNKNOWN"
-                    else "UNRESOLVED"
-                ),
-                resolved_at=now,
-            )
-        assert member is not None
-        matched.append(member)
-    if not matched:
+    # Cloud member IDs are tenant-local. In this tenant the cloud login is the
+    # e-mail address, so resolve the source e-mail against target login.
+    if not owner.email:
         return OwnerResolution(
             owner.source_owner_id, owner.fingerprint, None, "UNRESOLVED",
             reason="UNRESOLVED", resolved_at=now,
         )
-    member_ids = {member["id"] for member in matched}
-    if len(member_ids) != 1:
+    member, failure = _unique_active_member(
+        lookup("login", owner.email), identity_key="login", identity_value=owner.email,
+    )
+    if failure or member is None:
         return OwnerResolution(
             owner.source_owner_id, owner.fingerprint, None, "UNRESOLVED",
-            reason="CONFLICTING_IDENTIFIERS", resolved_at=now,
+            reason=failure or "UNRESOLVED", resolved_at=now,
         )
-    member = matched[0]
-    # When both identifiers are present, both lookups must describe the same
-    # exact target identity, not merely the same numeric member ID.
-    if owner.login and normalized_identity(member.get("login")) != normalized_identity(owner.login):
+    if normalized_identity(member.get("login")) != normalized_identity(owner.email):
         return OwnerResolution(
             owner.source_owner_id, owner.fingerprint, None, "UNRESOLVED",
-            reason="CONFLICTING_IDENTIFIERS", resolved_at=now,
-        )
-    if owner.email and normalized_identity(member.get("email")) != normalized_identity(owner.email):
-        return OwnerResolution(
-            owner.source_owner_id, owner.fingerprint, None, "UNRESOLVED",
-            reason="CONFLICTING_IDENTIFIERS", resolved_at=now,
+            reason="UNRESOLVED", resolved_at=now,
         )
     return OwnerResolution(
         owner.source_owner_id, owner.fingerprint, int(member["id"]), "EXACT",
         target_login=member.get("login"), target_email=member.get("email"),
         target_display_name=member.get("display_name"), target_active=member.get("active"),
         resolved_at=now,
+    )
+
+
+def resolve_target_login(
+    login: str,
+    lookup: Callable[[str, str], Sequence[Mapping[str, Any]]],
+) -> dict[str, Any] | None:
+    """Resolve one active target member by its configured cloud login."""
+    member, failure = _unique_active_member(
+        lookup("login", login), identity_key="login", identity_value=login,
+    )
+    if failure or member is None:
+        return None
+    return member
+
+
+def resolve_manual_owner_mapping(
+    owner: OwnerIdentity,
+    mapping: Mapping[str, Any],
+    lookup: Callable[[str, str], Sequence[Mapping[str, Any]]],
+) -> OwnerResolution | None:
+    """Resolve an optional operator-supplied source-owner to cloud-login mapping."""
+    configured = mapping.get(str(owner.source_owner_id))
+    if configured is None:
+        return None
+    login = configured if isinstance(configured, str) else configured.get("login")
+    login = normalized_optional(login)
+    if not login:
+        raise TerminalMigrationError(
+            f"Manual owner mapping for {owner.source_owner_id} requires a cloud login"
+        )
+    member = resolve_target_login(login, lookup)
+    if member is None:
+        raise TerminalMigrationError(
+            f"Manual owner mapping for {owner.source_owner_id} is not one unique active GX39 user"
+        )
+    return OwnerResolution(
+        owner.source_owner_id, owner.fingerprint, int(member["id"]), "APPROVED_MAPPING",
+        reason="MANUAL_MAPPING", target_login=member.get("login"),
+        target_email=member.get("email"), target_display_name=member.get("display_name"),
+        target_active=member.get("active"),
+        resolved_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     )
 
 
@@ -338,28 +352,20 @@ def resolve_fallback_principal(
     member_id = _member_id(fallback)
     login = normalized_optional(fallback.get("login") or fallback.get("username"))
     email = normalized_optional(fallback.get("email") or fallback.get("mail"))
-    if member_id is None or (not login and not email):
+    if member_id is None or not (login or email):
         raise TerminalMigrationError(
             "Fallback principal requires a member_id and an exact login or email"
         )
-    matches: list[dict[str, Any]] = []
-    for key, value in (("login", login), ("email", email)):
-        if value:
-            member, failure = _unique_active_member(
-                lookup(key, value), identity_key=key, identity_value=value
-            )
-            if failure or member is None:
-                raise TerminalMigrationError(
-                    f"Fallback principal {key} is not a unique active GX39 user"
-                )
-            matches.append(member)
-    if any(int(member["id"]) != member_id for member in matches):
-        raise TerminalMigrationError("Fallback principal identifiers resolve to different GX39 users")
-    member = matches[0]
-    if login and normalized_identity(member.get("login")) != normalized_identity(login):
-        raise TerminalMigrationError("Fallback principal login read-back does not match")
-    if email and normalized_identity(member.get("email")) != normalized_identity(email):
-        raise TerminalMigrationError("Fallback principal email read-back does not match")
+    identity_key = "login" if login else "email"
+    identity_value = login if login else email
+    assert identity_value is not None
+    member, failure = _unique_active_member(
+        lookup(identity_key, identity_value), identity_key=identity_key, identity_value=identity_value,
+    )
+    if failure or member is None or int(member["id"]) != member_id:
+        raise TerminalMigrationError("Fallback principal is not a unique active GX39 user")
+    if normalized_identity(member.get(identity_key)) != normalized_identity(identity_value):
+        raise TerminalMigrationError(f"Fallback principal {identity_key} read-back does not match")
     return member
 
 

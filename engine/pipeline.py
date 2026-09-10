@@ -27,7 +27,6 @@ from .models import (
 )
 from .provenance import (
     METADATA_CONTRACT_VERSION,
-    OwnerIdentity,
     OwnerResolution,
     exception_set_digest,
     fallback_resolve,
@@ -35,7 +34,9 @@ from .provenance import (
     normalized_identity,
     provenance_values,
     resolve_fallback_principal,
+    resolve_manual_owner_mapping,
     resolve_owner_identity,
+    resolve_target_login,
     sanitized_owner_summary,
     utc_iso,
     version_provenance_values,
@@ -185,6 +186,16 @@ class MigrationPipeline:
         properties = self.target.get_node(target)
         return {"status": "found", "requested_id": target, "properties": properties}
 
+    def inspect_target_contract(self, target_node_id: int) -> dict[str, Any]:
+        """Read target update capabilities without mutating the existing object."""
+        target = int(target_node_id)
+        return {
+            "status": "inspected",
+            "node_id": target,
+            "properties": self.target.get_node(target),
+            "system_attribute_capabilities": self.target.system_attribute_capabilities(target),
+        }
+
     def confirm_source_freeze(self, operator: str, note: str = "") -> dict[str, Any]:
         root = int(self.env_cfg.get("source_workspace_nodeid"))
         observed = self.source_db.scope_signature(root)
@@ -315,8 +326,10 @@ class MigrationPipeline:
             result["error"] = "GX39 client does not expose GET-only member lookup"
             return result
 
+        mappings = self.env_cfg.get("owner_mappings", {}) or {}
         resolutions = [
-            resolve_owner_identity(owners[owner_id], lookup)
+            resolve_manual_owner_mapping(owners[owner_id], mappings, lookup)
+            or resolve_owner_identity(owners[owner_id], lookup)
             for owner_id in owner_ids
         ]
         result["resolutions"] = [
@@ -333,6 +346,12 @@ class MigrationPipeline:
             for resolution in resolutions
         ]
         exceptions = [resolution for resolution in resolutions if resolution.is_exception]
+        service_login = str(
+            self.env_cfg.get("service_account_login")
+            or self.env_cfg.get("ot_cloud_user")
+            or getattr(target, "username", "")
+        ).strip()
+        service_member = resolve_target_login(service_login, lookup) if service_login else None
         result["exceptions"] = [
             {
                 "source_owner_id": resolution.source_owner_id,
@@ -346,7 +365,10 @@ class MigrationPipeline:
             fallback_config = (
                 self.env_cfg.get("owner_fallback")
                 or self.env_cfg.get("legacy_owner_fallback")
-                or {}
+                or (
+                    {"member_id": service_member["id"], "login": service_member.get("login")}
+                    if service_member is not None else {}
+                )
             )
             if fallback_config:
                 try:
@@ -368,29 +390,19 @@ class MigrationPipeline:
         else:
             result["status"] = "PASS"
 
-        service_login = str(
-            self.env_cfg.get("service_account_login")
-            or self.env_cfg.get("ot_cloud_user")
-            or getattr(target, "username", "")
-        ).strip()
         service_email = str(self.env_cfg.get("service_account_email") or "").strip()
         if service_login or service_email:
-            service_owner = OwnerIdentity(
-                source_owner_id=-1, login=service_login or None,
-                email=service_email or None, active=True,
-            )
-            service_resolution = resolve_owner_identity(service_owner, lookup)
             result["service_account"] = {
-                "status": service_resolution.resolution_status,
-                "reason": service_resolution.reason,
-                "id": service_resolution.target_member_id,
-                "login": service_resolution.target_login,
-                "email": service_resolution.target_email,
-                "active": service_resolution.target_active,
+                "status": "EXACT" if service_member else "UNRESOLVED",
+                "reason": None if service_member else "UNRESOLVED",
+                "id": service_member.get("id") if service_member else None,
+                "login": service_member.get("login") if service_member else None,
+                "email": service_member.get("email") if service_member else None,
+                "active": service_member.get("active") if service_member else None,
             }
             if (
-                service_resolution.resolution_status != "EXACT"
-                or service_resolution.target_member_id is None
+                service_member is None
+                or service_member.get("id") is None
             ):
                 result["status"] = "BLOCKED"
         else:
@@ -413,17 +425,28 @@ class MigrationPipeline:
         lookup = getattr(target, "lookup_members", None) or getattr(target, "find_members", None)
         if not callable(lookup):
             raise TerminalMigrationError("GX39 client does not expose GET-only member lookup")
+        mappings = self.env_cfg.get("owner_mappings", {}) or {}
         resolutions = [
-            resolve_owner_identity(by_id[owner_id], lookup)
+            resolve_manual_owner_mapping(by_id[owner_id], mappings, lookup)
+            or resolve_owner_identity(by_id[owner_id], lookup)
             for owner_id in sorted(owner_ids)
         ]
         exceptions = [resolution for resolution in resolutions if resolution.is_exception]
+        service_login = str(
+            self.env_cfg.get("service_account_login")
+            or self.env_cfg.get("ot_cloud_user")
+            or getattr(target, "username", "")
+        ).strip()
+        service_member = resolve_target_login(service_login, lookup) if service_login else None
         fallback_approval: dict[str, Any] | None = None
         if exceptions:
             fallback_config = (
                 self.env_cfg.get("owner_fallback")
                 or self.env_cfg.get("legacy_owner_fallback")
-                or {}
+                or (
+                    {"member_id": service_member["id"], "login": service_member.get("login")}
+                    if service_member is not None else {}
+                )
             )
             if not isinstance(fallback_config, dict) or not fallback_config:
                 raise TerminalMigrationError(
@@ -469,34 +492,21 @@ class MigrationPipeline:
                 "operator": operator,
                 "change_record": change_record,
             }
-        service_login = str(
-            self.env_cfg.get("service_account_login")
-            or self.env_cfg.get("ot_cloud_user")
-            or getattr(target, "username", "")
-        ).strip()
         service_email = str(self.env_cfg.get("service_account_email") or "").strip()
         if not service_login and not service_email:
             raise TerminalMigrationError(
                 "SERVICE_ACCOUNT_IDENTITY: configured GX39 migration account is missing"
             )
-        service_owner = OwnerIdentity(
-            source_owner_id=-1,
-            login=service_login or None,
-            email=service_email or None,
-            active=True,
-        )
-        service_resolution = resolve_owner_identity(service_owner, lookup)
-        if service_resolution.resolution_status != "EXACT" or service_resolution.target_member_id is None:
+        if service_member is None:
             raise TerminalMigrationError(
-                f"SERVICE_ACCOUNT_IDENTITY: migration account is not one unique active GX39 user "
-                f"({service_resolution.reason or 'unresolved'})"
+                "SERVICE_ACCOUNT_IDENTITY: migration account is not one unique active GX39 user"
             )
         service_identity = {
-            "id": service_resolution.target_member_id,
-            "login": service_resolution.target_login,
-            "email": service_resolution.target_email,
-            "display_name": service_resolution.target_display_name,
-            "active": service_resolution.target_active,
+            "id": service_member["id"],
+            "login": service_member.get("login"),
+            "email": service_member.get("email"),
+            "display_name": service_member.get("display_name"),
+            "active": service_member.get("active"),
         }
         return resolutions, fallback_approval, service_identity
 
@@ -670,6 +680,17 @@ class MigrationPipeline:
                 self._run_phase(run_id, mode, "DOCUMENT", workers, self._process_document)
             if not self.manifest.should_stop(run_id):
                 self._run_phase(run_id, mode, "REFERENCE", min(2, workers), self._process_reference)
+            # Owner reassignment runs as a final, dedicated phase after every
+            # container/document/reference in the run has been created. GX39
+            # inherits ACLs from a parent at child-creation time; reassigning a
+            # container's owner before all of its descendants (at any depth)
+            # exist would strip the migration account's ACL entry on the
+            # parent and cause every not-yet-created child to inherit an ACL
+            # without that account, breaking subsequent metadata writes with
+            # "Insufficient permissions". Deferring owner assignment until the
+            # whole tree is committed avoids that race entirely.
+            if not self.manifest.should_stop(run_id) and mode != RunMode.DRY_RUN:
+                self._run_phase(run_id, mode, "OWNER", workers, self._process_owner_assignment)
             final = self.manifest.finish_run(run_id)
             self.log(f"Run {run_id} finished with {final}")
         except Exception as exc:
@@ -694,6 +715,21 @@ class MigrationPipeline:
                 wait(futures)
                 for future in futures:
                     future.result()
+            if phase == "OWNER":
+                counts = self.manifest.phase_counts(run_id, "OWNER")
+                if self.manifest.block_children_of_failed(run_id, "OWNER"):
+                    counts = self.manifest.phase_counts(run_id, "OWNER")
+                pending = counts.get(ItemState.OWNER_PENDING, 0)
+                retrying = counts.get(ItemState.RETRY_WAIT, 0)
+                claimed = counts.get(ItemState.CLAIMED, 0)
+                if pending or claimed:
+                    if retrying:
+                        time.sleep(1.0)
+                    continue
+                if retrying:
+                    time.sleep(1.0)
+                    continue
+                break
             counts = self.manifest.phase_counts(run_id, phase)
             if self.manifest.block_children_of_failed(run_id, phase):
                 counts = self.manifest.phase_counts(run_id, phase)
@@ -718,10 +754,16 @@ class MigrationPipeline:
             self._pause_event.wait()
             if self.manifest.should_stop(run_id):
                 return
-            item = self.manifest.claim_next(
-                run_id, phase, worker_id,
-                lease_seconds=int(self.settings.get("item_lease_seconds", 1800)),
-            )
+            if phase == "OWNER":
+                item = self.manifest.claim_next_owner(
+                    run_id, worker_id,
+                    lease_seconds=int(self.settings.get("item_lease_seconds", 1800)),
+                )
+            else:
+                item = self.manifest.claim_next(
+                    run_id, phase, worker_id,
+                    lease_seconds=int(self.settings.get("item_lease_seconds", 1800)),
+                )
             if not item:
                 return
             with self._metrics_lock:
@@ -796,8 +838,7 @@ class MigrationPipeline:
         properties = self.target.get_node(target_id)
         if int(properties.get("parent_id", -1)) != parent or properties.get("name") != node.name:
             raise TerminalMigrationError(f"Container read-after-write mismatch for {node.source_id}")
-        self.manifest.mark_state(run_id, node.source_id, ItemState.VERIFIED, worker_id=worker_id)
-        self.manifest.mark_mapping_verified(node.source_id)
+        self._finish_item(run_id, node.source_id, worker_id=worker_id)
 
     def _process_document(self, run_id: str, worker_id: str, item: dict[str, Any], mode: RunMode) -> None:
         node = self.manifest.source_node(item["source_id"])
@@ -891,8 +932,21 @@ class MigrationPipeline:
         )
         if bool(self.settings.get("verify_sha256", True)):
             self._verify_document(run_id, node, target_id, versions)
-        self.manifest.mark_state(run_id, node.source_id, ItemState.VERIFIED, target_id=target_id)
-        self.manifest.mark_mapping_verified(node.source_id)
+        self._finish_item(run_id, node.source_id, target_id=target_id)
+
+    def _finish_item(
+        self, run_id: str, source_id: int, *, worker_id: str | None = None, target_id: int | None = None,
+    ) -> None:
+        """Mark an item's content/provenance work done and queue its final owner assignment.
+
+        Owner reassignment is deferred to a dedicated run-wide OWNER phase
+        (see MigrationPipeline._execute) so that no container loses the
+        migration account's ACL entry before all of its descendants exist.
+        """
+        self.manifest.mark_state(
+            run_id, source_id, ItemState.OWNER_PENDING, worker_id=worker_id, target_id=target_id,
+        )
+        self.manifest.mark_mapping_verified(source_id)
 
     def _apply_node_policies(
         self, run_id: str, target_id: int, node: SourceNode,
@@ -924,7 +978,6 @@ class MigrationPipeline:
                 raise TerminalMigrationError(
                     f"Source owner {node.owner_id} has no resolved target member"
                 )
-            self.target.assign_owner(target_id, int(resolution.target_member_id))
             node_values = provenance_values(
                 {
                     "source_id": node.source_id,
@@ -949,6 +1002,11 @@ class MigrationPipeline:
                 if versions is not None
                 else None
             )
+            # Provenance is written by the migration service account. Owner
+            # reassignment happens later, in a dedicated run-wide final phase
+            # (see MigrationPipeline._execute / _process_owner_assignment),
+            # so that no container loses the migration account's ACL entry
+            # before all of its descendants (at any depth) have been created.
             self.target.apply_provenance(target_id, node_values, version_values)
         elif self.env_cfg.get("system_attribute_strategy") == "preserve":
             # Compatibility for isolated pre-contract test doubles only. The
@@ -985,13 +1043,11 @@ class MigrationPipeline:
         resolution = self.manifest.run_owner_resolution(run_id, int(node.owner_id))
         if resolution.target_member_id is None:
             raise TerminalMigrationError(f"Missing target owner resolution for {node.source_id}")
-        owner = self.target.read_owner(target_id)
-        owner_id = _member_id_from_value(owner)
-        if owner_id != int(resolution.target_member_id):
-            raise TerminalMigrationError(
-                f"Target owner read-back mismatch for {node.source_id}: "
-                f"expected {resolution.target_member_id}, got {owner_id}"
-            )
+        # Owner read-back is intentionally NOT verified here: owner
+        # reassignment is deferred to a dedicated run-wide final phase (see
+        # MigrationPipeline._process_owner_assignment) so a container never
+        # loses the migration account's ACL entry before all descendants
+        # exist. Owner read-back is verified there, once assign_owner runs.
         run = self.manifest.run_status(run_id)
         creator = self.target.read_creator(target_id)
         creator_id = _member_id_from_value(creator)
@@ -1055,6 +1111,41 @@ class MigrationPipeline:
                     raise TerminalMigrationError(
                         f"Version provenance read-back mismatch for {field}"
                     )
+
+    def _process_owner_assignment(self, run_id: str, worker_id: str, item: dict[str, Any], mode: RunMode) -> None:
+        """Final run-wide phase: reassign the target owner once the whole tree exists.
+
+        Deferring this from _apply_node_policies avoids GX39 ACL inheritance
+        breaking not-yet-created descendants (see finding on container owner
+        reassignment racing with child creation).
+        """
+        node = self.manifest.source_node(item["source_id"])
+        target_id = item.get("target_id")
+        if target_id is None:
+            mapping = self.manifest.lookup_mapping(node.source_id)
+            target_id = mapping["target_id"] if mapping else None
+        if target_id is None:
+            raise TerminalMigrationError(f"No target mapping available for owner assignment on {node.source_id}")
+        target_id = int(target_id)
+        modern_methods = ("assign_owner", "read_owner")
+        modern_contract = all(callable(getattr(self.target, name, None)) for name in modern_methods)
+        if modern_contract:
+            if node.owner_id is None:
+                raise TerminalMigrationError(
+                    f"Source node {node.source_id} has no owner identity for the owner/provenance contract"
+                )
+            resolution = self.manifest.run_owner_resolution(run_id, int(node.owner_id))
+            if resolution.target_member_id is None:
+                raise TerminalMigrationError(f"Source owner {node.owner_id} has no resolved target member")
+            self.target.assign_owner(target_id, int(resolution.target_member_id))
+            owner = self.target.read_owner(target_id)
+            owner_id = _member_id_from_value(owner)
+            if owner_id != int(resolution.target_member_id):
+                raise TerminalMigrationError(
+                    f"Target owner read-back mismatch for {node.source_id}: "
+                    f"expected {resolution.target_member_id}, got {owner_id}"
+                )
+        self.manifest.mark_state(run_id, node.source_id, ItemState.VERIFIED, worker_id=worker_id, target_id=target_id)
 
     def _multipart_upload(
         self, run_id: str, node: SourceNode, version: SourceVersion, parent: int,
@@ -1160,8 +1251,7 @@ class MigrationPipeline:
         properties = self.target.get_node(target_id)
         if int(properties.get("parent_id", -1)) != parent or properties.get("name") != node.name:
             raise TerminalMigrationError(f"Reference read-after-write mismatch for {node.source_id}")
-        self.manifest.mark_state(run_id, node.source_id, ItemState.VERIFIED, worker_id=worker_id)
-        self.manifest.mark_mapping_verified(node.source_id)
+        self._finish_item(run_id, node.source_id, worker_id=worker_id)
 
     def _try_reconcile_version(
         self, run_id: str, node: SourceNode, version: SourceVersion, target_id: int,
@@ -1308,6 +1398,8 @@ class MigrationPipeline:
             **({
                 "success_nodes": run["verified_nodes"] + run["simulated_nodes"],
                 "failed_nodes": run["failed_nodes"],
+                "remote_committed_nodes": run.get("remote_committed_nodes", 0),
+                "metadata_pending_nodes": run.get("metadata_pending_nodes", 0),
                 "progress_percent": run["progress_percent"],
                 "state_counts": run["state_counts"],
             } if run else {"success_nodes": 0, "failed_nodes": 0, "progress_percent": 0.0, "state_counts": {}}),

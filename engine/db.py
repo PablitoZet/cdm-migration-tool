@@ -273,14 +273,16 @@ class SourceDB:
         if not id_column:
             return list(result.values())
         login_column = self._first_existing_column(
-            conn, "kuaf", ("username", "loginname", "login", "user_name")
+            conn, "kuaf", ("username", "loginname", "login", "user_name", "name")
         )
         email_column = self._first_existing_column(
             conn, "kuaf", ("mailaddress", "email", "emailaddress", "mail")
         )
         display_column = self._first_existing_column(
-            conn, "kuaf", ("name", "displayname", "fullname", "full_name")
+            conn, "kuaf", ("displayname", "fullname", "full_name", "nameformatted")
         )
+        first_name_column = self._first_existing_column(conn, "kuaf", ("firstname", "first_name"))
+        last_name_column = self._first_existing_column(conn, "kuaf", ("lastname", "last_name"))
         deleted_column = self._first_existing_column(conn, "kuaf", ("deleted",))
         disabled_column = self._first_existing_column(conn, "kuaf", ("disabled", "isdisabled"))
         active_column = self._first_existing_column(conn, "kuaf", ("active", "isactive", "enabled"))
@@ -292,11 +294,19 @@ class SourceDB:
         def expression(column: str | None) -> str:
             return f"k.{column}" if column else "NULL::text"
 
+        display_expression = expression(display_column)
+        if not display_column and (first_name_column or last_name_column):
+            display_expression = (
+                "NULLIF(BTRIM(CONCAT_WS(' ', "
+                f"{expression(first_name_column)}, {expression(last_name_column)})), '')"
+            )
+
+        lookup_ids = sorted({self._kuaf_lookup_id(owner_id) for owner_id in owner_ids})
         query = f"""
-            SELECT k.{id_column} source_owner_id,
+            SELECT k.{id_column} kuaf_id,
                    {expression(login_column)} login_value,
                    {expression(email_column)} email_value,
-                   {expression(display_column)} display_value,
+                   {display_expression} display_value,
                    {expression(deleted_column)} deleted_value,
                    {expression(disabled_column)} disabled_value,
                    {expression(active_column)} active_value,
@@ -307,21 +317,24 @@ class SourceDB:
              ORDER BY k.{id_column}
         """
         with self._cursor(conn) as cur:
-            cur.execute(query, (owner_ids,))
+            cur.execute(query, (lookup_ids,))
             rows = [dict(row) for row in cur.fetchall()]
-        seen: set[int] = set()
+        rows_by_kuaf_id: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
-            owner_id = int(row["source_owner_id"])
-            if owner_id not in result or owner_id in seen:
-                if owner_id in result:
-                    result[owner_id].update({
-                        "identity_status": "AMBIGUOUS",
-                        "active": None,
-                        "status_value": None,
-                        "status_source": None,
-                    })
-                continue
-            seen.add(owner_id)
+            rows_by_kuaf_id.setdefault(int(row["kuaf_id"]), []).append(row)
+        for owner_id in owner_ids:
+            matches = rows_by_kuaf_id.get(self._kuaf_lookup_id(owner_id), [])
+            if not matches:
+               continue
+            if len(matches) > 1:
+               result[owner_id].update({
+                   "identity_status": "AMBIGUOUS",
+                   "active": None,
+                   "status_value": None,
+                   "status_source": None,
+               })
+               continue
+            row = matches[0]
             active, status_source = self._owner_active_state(row)
             identity_status = "KNOWN"
             if active is None:
@@ -340,6 +353,11 @@ class SourceDB:
                 "identity_status": identity_status,
             }
         return [result[owner_id] for owner_id in owner_ids]
+
+    @staticmethod
+    def _kuaf_lookup_id(owner_id: int) -> int:
+        # Content Server encodes user owners as negative DTree IDs while KUAF IDs are positive.
+        return -owner_id if owner_id < 0 else owner_id
 
     @staticmethod
     def _clean_text(value: Any) -> str | None:

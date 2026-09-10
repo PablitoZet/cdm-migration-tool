@@ -10,7 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from engine.client import MultipartStream, OpenTextCloudClient, _TokenManager
+from engine.client import MultipartStream, OpenTextCloudClient, _extract_member_rows, _TokenManager
 from engine.config import (
     ConfigurationError,
     EnvironmentConfig,
@@ -128,7 +128,7 @@ class ModernFakeTarget(FakeTarget):
         super().__init__()
         self.members = [
             {
-                "id": 4200, "login": "source-owner", "email": "owner@example.invalid",
+                "id": 4200, "login": "owner@example.invalid", "email": "owner@example.invalid",
                 "display_name": "Source Owner", "active": True,
             },
             {
@@ -314,6 +314,38 @@ class _TestSourceDB(SourceDB):
         return conn.cursor()
 
 
+class _OwnerTestSourceDB(_TestSourceDB):
+    owner_columns = {
+        "id": "id",
+        "name": "name",
+        "firstname": "firstname",
+        "lastname": "lastname",
+        "mailaddress": "mailaddress",
+        "deleted": "deleted",
+        "type": "type",
+    }
+
+    def _first_existing_column(self, _conn, _table, candidates):
+        return next((self.owner_columns[item] for item in candidates if item in self.owner_columns), None)
+
+
+class _OwnerConnection:
+    def __init__(self, owner_rows):
+        self.owner_rows = owner_rows
+        self.lookup_ids = []
+        self.owner_query = ""
+
+    def cursor(self, **_kwargs):
+        return _OwnerCursor(self)
+
+
+class _OwnerCursor(_VersionCursor):
+    def execute(self, query, params):
+        self.connection.owner_query = query
+        self.connection.lookup_ids = list(params[0])
+        self.rows = self.connection.owner_rows
+
+
 def _version_row(provider_data="blob/content.bin", provider_type="azureblob"):
     return {
         "doc_source_id": 3,
@@ -333,6 +365,29 @@ def _version_row(provider_data="blob/content.bin", provider_type="azureblob"):
 
 
 class SourceExtractionTests(unittest.TestCase):
+    def test_negative_dtree_owner_id_resolves_positive_kuaf_identity(self):
+        connection = _OwnerConnection([{
+            "kuaf_id": 228908,
+            "login_value": "source-owner",
+            "email_value": "owner@example.invalid",
+            "display_value": "Source Owner",
+            "deleted_value": 0,
+            "disabled_value": None,
+            "active_value": None,
+            "status_value": None,
+            "type_value": 0,
+        }])
+
+        owners = _OwnerTestSourceDB({})._extract_owners(connection, [-228908])
+
+        self.assertEqual(connection.lookup_ids, [228908])
+        self.assertEqual(owners[0]["source_owner_id"], -228908)
+        self.assertEqual(owners[0]["login"], "source-owner")
+        self.assertEqual(owners[0]["email"], "owner@example.invalid")
+        self.assertTrue(owners[0]["active"])
+        self.assertEqual(owners[0]["identity_status"], "KNOWN")
+        self.assertIn("CONCAT_WS", connection.owner_query)
+
     def test_primary_versions_join_provider_data_and_exclude_renditions(self):
         connection = _VersionConnection([_version_row()])
         rows = _TestSourceDB({
@@ -364,6 +419,33 @@ class SourceExtractionTests(unittest.TestCase):
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_gx39_member_properties_are_normalized_for_exact_identity(self):
+        rows = _extract_member_rows({
+            "results": [{
+                "data": {
+                    "properties": {
+                        "id": 7,
+                        "name": "alice",
+                        "name_formatted": "Alice Example",
+                        "business_email": "alice@example.invalid",
+                        "deleted": False,
+                    }
+                }
+            }]
+        })
+
+        self.assertEqual(rows, [{
+            "id": 7,
+            "name": "alice",
+            "name_formatted": "Alice Example",
+            "business_email": "alice@example.invalid",
+            "deleted": False,
+            "login": "alice",
+            "email": "alice@example.invalid",
+            "display_name": "Alice Example",
+            "active": True,
+        }])
+
     def test_member_display_name_is_not_used_as_login_evidence(self):
         member = member_identity({
             "id": 7,
@@ -387,14 +469,14 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(member["email"], "alice@example.invalid")
         self.assertTrue(member["active"])
 
-    def test_dual_identifiers_must_converge_on_one_active_member(self):
+    def test_owner_resolution_uses_exact_active_email(self):
         calls = []
 
         def lookup(identity_key, identity_value):
             calls.append((identity_key, identity_value))
             return [{
                 "id": 7,
-                "login": "Alice",
+                "login": "alice@example.invalid",
                 "email": "alice@example.invalid",
                 "display_name": "Alice",
                 "active": True,
@@ -402,32 +484,38 @@ class ProvenanceTests(unittest.TestCase):
 
         resolution = resolve_owner_identity(
             OwnerIdentity(
-                42, login=" alice ", email="ALICE@example.invalid",
+                42, login="different-login", email="ALICE@example.invalid",
                 display_name="Alice", active=True,
             ),
             lookup,
         )
         self.assertEqual(resolution.resolution_status, "EXACT")
         self.assertEqual(resolution.target_member_id, 7)
-        self.assertEqual(calls, [
-            ("login", " alice "),
-            ("email", "ALICE@example.invalid"),
-        ])
+        self.assertEqual(calls, [("login", "ALICE@example.invalid")])
+
+    def test_owner_without_email_cannot_be_resolved_by_login(self):
+        calls = []
+        resolution = resolve_owner_identity(
+            OwnerIdentity(42, login="alice", active=True),
+            lambda key, value: calls.append((key, value)) or [],
+        )
+        self.assertEqual(resolution.reason, "UNRESOLVED")
+        self.assertEqual(calls, [])
 
     def test_conflicting_or_unknown_target_matches_fail_closed(self):
-        owner = OwnerIdentity(42, login="alice", active=True)
+        owner = OwnerIdentity(42, login="alice", email="alice@example.invalid", active=True)
         ambiguous = resolve_owner_identity(
             owner,
             lambda _key, _value: [
-                {"id": 7, "login": "alice", "active": True},
-                {"id": 8, "login": "alice", "active": True},
+                {"id": 7, "login": "alice@example.invalid", "active": True},
+                {"id": 8, "login": "alice@example.invalid", "active": True},
             ],
         )
         self.assertEqual(ambiguous.reason, "AMBIGUOUS")
 
         unknown = resolve_owner_identity(
             owner,
-            lambda _key, _value: [{"id": 7, "login": "alice"}],
+            lambda _key, _value: [{"id": 7, "login": "alice@example.invalid"}],
         )
         self.assertEqual(unknown.reason, "STATUS_UNKNOWN")
 
@@ -760,7 +848,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(checkpoint["next_part"], 7)
             store.close()
 
-    def test_recovery_requeues_only_retryable_terminal_failures(self):
+    def test_recovery_requeues_all_terminal_failures_after_explicit_operator_action(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
             closing(ManifestStore(str(Path(tmp) / "state.db"))) as store,
@@ -788,6 +876,12 @@ class ManifestTests(unittest.TestCase):
             )
             store.finish_run(run_id, RunStatus.COMPLETED_WITH_ERRORS)
 
+            # Explicit recover_run() is a deliberate operator action, already
+            # gated upstream (pipeline preflight + identity/config-fingerprint
+            # checks). It requeues every FAILED_TERMINAL item regardless of
+            # error code, since e.g. a since-fixed client contract bug can
+            # leave otherwise-valid items terminally failed, and the
+            # duplicate-protection marker prevents unsafe duplicate creates.
             store.recover_run(run_id)
 
             with store.connection() as conn:
@@ -799,7 +893,7 @@ class ManifestTests(unittest.TestCase):
                     )
                 }
             self.assertEqual(states[retryable["source_id"]], (ItemState.RETRY_WAIT, 0))
-            self.assertEqual(states[terminal["source_id"]], (ItemState.FAILED_TERMINAL, 1))
+            self.assertEqual(states[terminal["source_id"]], (ItemState.RETRY_WAIT, 0))
 
     def test_recovery_rejects_active_and_unqualified_run_statuses(self):
         statuses = (
@@ -1133,7 +1227,7 @@ class PipelineTests(unittest.TestCase):
                 run_id = pipeline.start_migration(threads=2, mode="full")
                 self.assertTrue(pipeline.wait(5))
                 self.assertEqual(pipeline.manifest.run_status(run_id)["status"], RunStatus.COMPLETED)
-                self.assertEqual(len(target.lookup_calls), 4)
+                self.assertEqual(len(target.lookup_calls), 2)
                 self.assertEqual({member_id for _, member_id in target.owner_calls}, {4200})
                 self.assertEqual(len(target.provenance_calls), 2)
                 document_provenance = next(
@@ -1322,7 +1416,7 @@ class PipelineTests(unittest.TestCase):
                     {row.source_owner_id for row in pipeline.manifest.run_owner_resolutions(run_id)},
                     {42},
                 )
-                self.assertEqual(len(target.lookup_calls), 4)
+                self.assertEqual(len(target.lookup_calls), 2)
 
     def test_dry_run_isolated_then_full_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1406,6 +1500,74 @@ class VerificationTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_assign_owner_uses_owner_permissions_route_and_right_id(self):
+        client = object.__new__(OpenTextCloudClient)
+        client.owner_assignment_endpoint = "/api/v2/nodes/{target_id}/permissions/owner"
+        client.owner_assignment_field = "right_id"
+        client.owner_assignment_permissions = []
+        calls = []
+
+        def request(method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+
+        client._request = request
+        client.assign_owner(170645, 35238)
+        self.assertEqual(calls[0][0], "PUT")
+        self.assertEqual(calls[0][1], "/api/v2/nodes/170645/permissions/owner")
+        self.assertEqual(
+            json.loads(calls[0][2]["data"]["body"]),
+            {"permissions": [], "right_id": 35238},
+        )
+
+    def test_apply_provenance_posts_new_category_before_falling_back_to_put(self):
+        client = object.__new__(OpenTextCloudClient)
+        client.provenance_category_id = 156923
+        client.provenance_attribute_keys = {"source_data_id": "156923_2"}
+        client.provenance_version_attribute_keys = {}
+        client.provenance_add_endpoint = "/api/v2/nodes/{target_id}/categories"
+        client.provenance_endpoint = "/api/v2/nodes/{target_id}/categories/{category_id}"
+        client.provenance_versions_field = "version_rows"
+        calls = []
+
+        def request(method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return None
+
+        client._request = request
+        client.apply_provenance(170645, {"source_data_id": "1604820"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "POST")
+        self.assertEqual(calls[0][1], "/api/v2/nodes/170645/categories")
+        self.assertEqual(
+            json.loads(calls[0][2]["data"]["body"]),
+            {"category_id": 156923, "156923_2": "1604820"},
+        )
+
+    def test_apply_provenance_falls_back_to_put_when_category_already_applied(self):
+        client = object.__new__(OpenTextCloudClient)
+        client.provenance_category_id = 156923
+        client.provenance_attribute_keys = {"source_data_id": "156923_2"}
+        client.provenance_version_attribute_keys = {}
+        client.provenance_add_endpoint = "/api/v2/nodes/{target_id}/categories"
+        client.provenance_endpoint = "/api/v2/nodes/{target_id}/categories/{category_id}"
+        client.provenance_versions_field = "version_rows"
+        calls = []
+
+        def request(method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            if method == "POST":
+                raise TerminalMigrationError("OpenText HTTP 400: category already exists on node")
+            return None
+
+        client._request = request
+        client.apply_provenance(170645, {"source_data_id": "1604820"})
+        self.assertEqual([c[0] for c in calls], ["POST", "PUT"])
+        self.assertEqual(calls[1][1], "/api/v2/nodes/170645/categories/156923")
+        self.assertEqual(
+            json.loads(calls[1][2]["data"]["body"]),
+            {"156923_2": "1604820"},
+        )
+
     def test_system_attribute_capabilities_reject_external_dates_as_system_fidelity(self):
         class Response:
             def json(self):

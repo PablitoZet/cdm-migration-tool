@@ -148,6 +148,7 @@ PROFILE_EDITABLE_KEYS = {
     "permission_strategy", "permission_mappings", "target_acl_approved",
     "provenance_category_id", "provenance_attribute_keys",
     "provenance_version_attribute_keys", "owner_fallback", "legacy_owner_fallback",
+    "owner_mappings",
     "service_account_login", "service_account_email",
     "member_lookup_endpoint", "member_lookup_param", "member_lookup_query_template",
     "member_lookup_fields", "owner_assignment_endpoint", "owner_assignment_field",
@@ -181,9 +182,13 @@ def status(deep: bool = False):
     parity = _pipeline.manifest.parity_report(env)
     pilot_preflight = (
         PreflightAuditor(env, _pipeline.manifest, _config.migration_settings).run(
-            for_mode="pilot", max_documents=100
+            online=deep, for_mode="pilot", max_documents=100
         )
         if inventory["total_nodes"] else None
+    )
+    owner_preflight = (
+        _pipeline.owner_readiness(online=deep, max_documents=100)
+        if inventory["total_nodes"] and deep else None
     )
     full_preflight = (
         PreflightAuditor(env, _pipeline.manifest, _config.migration_settings).run(for_mode="full")
@@ -226,14 +231,21 @@ def status(deep: bool = False):
         "manifest_stats": inventory,
         "freeze": freeze,
         "parity": parity,
+        "pilot_parity": _pipeline.manifest.parity_report(env, include_qualification=False),
         "workflow": {
             "manifest_ready": bool(inventory["total_nodes"]),
             "marker_ready": bool(env.get("migration_category_id") and env.get("migration_attribute_key")),
-            "pilot_ready": bool(pilot_preflight and pilot_preflight["status"] != "FAIL"),
+            "pilot_ready": bool(
+                pilot_preflight and pilot_preflight["status"] != "FAIL"
+                and (owner_preflight is None or owner_preflight["status"] == "PASS")
+            ),
             "pilot_blockers": [
                 check["id"] for check in (pilot_preflight or {}).get("checks", [])
-                if check["status"] == "FAIL"
-            ],
+                if check["status"] == "FAIL" and check["id"] not in {
+                    "OWNER_RESOLUTION", "SERVICE_ACCOUNT_IDENTITY",
+                }
+            ] + (["OWNER_RESOLUTION"] if owner_preflight and owner_preflight["status"] != "PASS" else []),
+            "owner_readiness": owner_preflight,
             "full_ready": bool(full_preflight and full_preflight["status"] != "FAIL"),
             "full_blockers": [
                 check["id"] for check in (full_preflight or {}).get("checks", [])
@@ -442,9 +454,25 @@ def discover_target(request: DiscoveryRequest):
         raise HTTPException(502, f"Target discovery failed: {type(exc).__name__}: {exc}") from exc
 
 
+@app.post("/api/diagnostics/target-contract", dependencies=[Depends(require_api_key)])
+def inspect_target_contract(request: DiscoveryRequest):
+    if _pipeline.is_running:
+        raise HTTPException(409, "Cannot inspect target during an active run")
+    try:
+        if request.node_id is None:
+            raise HTTPException(400, "node_id is required")
+        return _pipeline.inspect_target_contract(request.node_id)
+    except Exception as exc:
+        raise HTTPException(502, f"Target contract inspection failed: {type(exc).__name__}: {exc}") from exc
+
+
 @app.get("/api/compatibility", dependencies=[Depends(require_api_key)])
-def compatibility():
-    return _pipeline.manifest.parity_report(_config.environment())
+def compatibility(stage: str = Query("pilot")):
+    if stage not in {"pilot", "full"}:
+        raise HTTPException(400, "stage must be pilot or full")
+    return _pipeline.manifest.parity_report(
+        _config.environment(), include_qualification=stage == "full",
+    )
 
 
 @app.get("/api/freeze", dependencies=[Depends(require_api_key)])
@@ -620,7 +648,10 @@ def nodes(page: int = Query(1, ge=1), limit: int = Query(25, ge=5, le=100)):
     total = run["total_nodes"]
     items = _pipeline.manifest.list_run_items(run["run_id"], limit, (page - 1) * limit)
     for item in items:
-        item["status"] = item["state"]
+        item["status"] = (
+            "PARTIAL" if item["state"] == "FAILED_TERMINAL" and item.get("target_id") is not None
+            else item["state"]
+        )
         item["error_msg"] = item.get("last_error")
         item["dry_run"] = run["mode"] == "dry_run"
         item["checksum_status"] = (

@@ -130,12 +130,18 @@ scope. A different signature rejects the cutover.
 Each execution has a UUID `run_id` and an independent set of run items.
 
 ```text
-READY -> CLAIMED -> REMOTE_COMMITTED -> METADATA_APPLIED -> VERIFIED
+READY -> CLAIMED -> REMOTE_COMMITTED -> METADATA_APPLIED -> OWNER_PENDING -> VERIFIED
                   \-> RETRY_WAIT -> CLAIMED
                   \-> FAILED_TERMINAL
 
 Dry Run: READY -> CLAIMED -> SIMULATED
 ```
+
+`OWNER_PENDING` marks an item whose content and provenance were written
+successfully but whose final target owner reassignment is deferred to a
+dedicated, run-wide `OWNER` phase (see "Phase ordering" below). An item in
+this state is claimed again, from `OWNER_PENDING`, once the OWNER phase runs;
+on success it transitions to `VERIFIED`.
 
 Claims contain worker ownership and expiration leases. A stopped process can be
 resumed only through explicit Run history recovery. Recovery releases incomplete
@@ -149,13 +155,26 @@ mapping and contract failures remain terminal.
 
 Real migration executes dependency-aware phases:
 
-1. create supported containers top-down;
-2. create/upload documents and all versions;
+1. create supported containers top-down, applying provenance (not owner);
+2. create/upload documents and all versions, applying provenance (not owner);
 3. recreate references after their target mappings exist;
-4. verify target state and record durable evidence.
+4. reassign the target owner for every created object, once the whole tree
+   (containers, documents and references, at every depth) exists;
+5. verify target state and record durable evidence.
 
 Children cannot run before their parent is mapped. Shortcuts cannot be created
 until the referenced source object has an approved target mapping.
+
+Owner reassignment is intentionally deferred to its own final phase, after
+every other object has been created. GX39 containers inherit their ACL from
+the parent at the moment a child is created. If a container's owner were
+reassigned immediately after the container itself is created, and that owner
+has a restrictive or empty permission list, any not-yet-created descendant
+would inherit an ACL without the migration service account's edit rights,
+causing later writes (categories, provenance, further children) to fail with
+HTTP 500 "Insufficient permissions". Running owner reassignment last, across
+the whole run, guarantees no container loses the migration account's ACL
+entry before all of its descendants exist.
 
 Business Workspace subtype 848 uses the target Business Workspace API and
 requires a configured target type/template route. Unknown container subtypes are

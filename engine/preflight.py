@@ -44,7 +44,8 @@ class PreflightAuditor:
         )
         if online:
             self._online_checks(
-                checks, sample_blobs, max_documents, owner_resolutions, fallback_approval, service_identity,
+                checks, sample_blobs, max_documents, owner_resolutions, fallback_approval,
+                service_identity, for_mode,
             )
         failures = sum(check.status == "FAIL" for check in checks)
         warnings = sum(check.status == "WARN" for check in checks)
@@ -283,6 +284,7 @@ class PreflightAuditor:
             f"missing_node_fields={missing_provenance}, missing_version_fields={missing_version_provenance}",
         ))
         if for_mode in ("pilot", "full"):
+            owner_checks_deferred = for_mode == "pilot" and owner_resolutions is None
             expected_resolution_ids = {int(owner_id) for owner_id in owner_ids}
             resolved_ids = {
                 resolution.source_owner_id for resolution in owner_resolutions or ()
@@ -291,12 +293,14 @@ class PreflightAuditor:
             if owner_resolutions is not None:
                 resolution_failures += [
                     resolution.source_owner_id for resolution in owner_resolutions
-                    if resolution.resolution_status not in {"EXACT", "APPROVED_FALLBACK"}
+                    if resolution.resolution_status not in {
+                        "EXACT", "APPROVED_MAPPING", "APPROVED_FALLBACK",
+                    }
                     or resolution.target_member_id is None
                 ]
             checks.append(Check(
                 "OWNER_RESOLUTION",
-                "PASS" if not resolution_failures else "FAIL",
+                "DEFERRED" if owner_checks_deferred else "PASS" if not resolution_failures else "FAIL",
                 f"missing_or_invalid_source_owner_ids={sorted(set(resolution_failures))[:20]}",
             ))
             exception_rows = [
@@ -313,12 +317,12 @@ class PreflightAuditor:
             )
             checks.append(Check(
                 "OWNER_FALLBACK_APPROVAL",
-                "PASS" if approval_ok else "FAIL",
+                "DEFERRED" if owner_checks_deferred else "PASS" if approval_ok else "FAIL",
                 f"exceptions={len(exception_rows)}, approval={'present' if fallback_approval else 'missing'}",
             ))
             checks.append(Check(
                 "SERVICE_ACCOUNT_IDENTITY",
-                "PASS" if service_identity and service_identity.get("id") else "FAIL",
+                "DEFERRED" if owner_checks_deferred else "PASS" if service_identity and service_identity.get("id") else "FAIL",
                 "Created By must read back to the resolved migration service account.",
             ))
 
@@ -328,6 +332,7 @@ class PreflightAuditor:
         owner_resolutions: list[OwnerResolution] | None,
         fallback_approval: dict[str, Any] | None,
         service_identity: dict[str, Any] | None,
+        for_mode: str | None,
     ) -> None:
         db_status = SourceDB(self.env).test_connection()
         checks.append(Check(
@@ -351,23 +356,23 @@ class PreflightAuditor:
             owner_route_ready = bool(self.env.get("owner_assignment_qualified"))
             checks.append(Check(
                 "OWNER_ASSIGNMENT_QUALIFICATION",
-                "PASS" if owner_route_ready else "FAIL",
+                "PASS" if owner_route_ready else "DEFERRED" if for_mode == "dry_run" else "FAIL",
                 "Ordinary folders/documents and every Business Workspace route require a qualified owner-write path.",
             ))
             provenance_route_ready = bool(self.env.get("provenance_category_qualified"))
             checks.append(Check(
                 "PROVENANCE_APPLICABILITY",
-                "PASS" if provenance_route_ready else "FAIL",
+                "PASS" if provenance_route_ready else "DEFERRED" if for_mode == "dry_run" else "FAIL",
                 "CDM Migration Provenance must be applicable and writable on every migrated object type.",
             ))
             checks.append(Check(
                 "PROVENANCE_READBACK_QUALIFICATION",
-                "PASS" if bool(self.env.get("provenance_readback_qualified")) else "FAIL",
+                "PASS" if bool(self.env.get("provenance_readback_qualified")) else "DEFERRED" if for_mode == "dry_run" else "FAIL",
                 "Provenance values and ordered version rows require qualified target read-back.",
             ))
             checks.append(Check(
                 "CREATOR_READBACK_QUALIFICATION",
-                "PASS" if bool(self.env.get("creator_readback_qualified")) else "FAIL",
+                "PASS" if bool(self.env.get("creator_readback_qualified")) else "DEFERRED" if for_mode == "dry_run" else "FAIL",
                 "Created By must be readable and identify the migration service account.",
             ))
             if owner_resolutions is not None:
@@ -375,7 +380,9 @@ class PreflightAuditor:
                     "OWNER_RESOLUTION_ONLINE",
                     "PASS" if all(
                         row.target_member_id is not None
-                        and row.resolution_status in {"EXACT", "APPROVED_FALLBACK"}
+                        and row.resolution_status in {
+                            "EXACT", "APPROVED_MAPPING", "APPROVED_FALLBACK",
+                        }
                         for row in owner_resolutions
                     ) else "FAIL",
                     f"resolved_distinct_source_owners={len(owner_resolutions)}",
