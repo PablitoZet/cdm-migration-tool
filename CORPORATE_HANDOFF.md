@@ -1,6 +1,6 @@
 # Corporate-machine engineering handoff
 
-Last updated: 2026-08-28
+Last updated: 2026-09-11
 
 This document is the current checkpoint for continuing development and
 qualification on the corporate machine. It records what has already been
@@ -26,7 +26,7 @@ repository.
 - The canonical upstream is private; obtain its URL through the approved
   operator channel rather than storing account identifiers in documentation.
 - GitHub quality workflow passes on Python 3.11.
-- Local clean-install validation passes with the full unit/contract suite (76
+- Local clean-install validation passes with the full unit/contract suite (87
   tests in this checkout), Ruff and
   mypy. The Windows bootstrap was also validated on Python 3.14; CI remains
   pinned to the canonical Python 3.11 baseline.
@@ -34,9 +34,48 @@ repository.
   fully qualify corporate Azure/GX39 behavior.
 - The first corporate GX39 DEV smoke run completed 19/19 objects and 12/12
   versions with hierarchy, hashes, categories, marker read-back and destination
-  permission evidence. It is **not yet approved for production execution**
-  because the replacement owner/provenance contract and the wider qualification
-  matrix remain blocked.
+  permission evidence.
+- A subsequent Representative Pilot against GX39 TEST (run
+  `aabc664c-1886-4523-9e53-996442a6a81d`, 2026-09-10) completed **19/19 nodes
+  VERIFIED with zero failures** on a small pre-existing on-premise folder (9
+  containers, 10 ordinary documents, up to 3 versions each). This is the first
+  fully clean end-to-end run of the current owner/provenance replacement
+  contract: hierarchy, content hashes, `CDM Migration ID` duplicate-protection
+  read-back, the dedicated final OWNER phase (service account →
+  target-resolved owner), and full `CDM Migration Provenance` read-back
+  (node-level and per-version dates/owner) all passed.
+- This Pilot found and fixed two defects that had blocked every earlier
+  attempt, both now resolved and regression-tested (see commit `e6fbc3f`):
+  1. Reassigning a container's owner immediately after its own metadata write
+     broke GX39's ACL inheritance for children created afterward. Fixed by
+     deferring every owner reassignment to a dedicated final run-wide `OWNER`
+     phase (see the `OWNER_PENDING` state in `ARCHITECTURE.md`).
+  2. GX39 `GET /api/v2/nodes/{id}/categories/{category_id}` returns multi-row/
+     set category values as flat keys (`categoryId_setId_row_attrId`) nested
+     under a `"categories"` wrapper, not as a nested list. `read_provenance()`
+     now reconstructs this recursively.
+  Both fixes required no product/config change beyond one GX39 tenant
+  correction (see next point) and are safe to carry into further
+  qualification.
+- Two GX39 TEST category attributes for `CDM Migration Provenance` were found
+  configured as `date` (day-only) instead of `datetime`: the node-level
+  `source_created_at`/`source_modified_at` fields and the three per-version
+  fields (created/modified/file date) inside the version set. GX39 silently
+  truncates the time-of-day on write for a `date`-typed attribute, which reads
+  back as a mismatch and is easy to misdiagnose as a client bug. The operator
+  changed all five attributes to `datetime` in GX39 TEST category admin, after
+  which the Pilot passed cleanly. **This is a tenant configuration setting, not
+  a code fix — it must be reproduced explicitly for every new GX39
+  environment (including production) before a Pilot/Cutover there.** See
+  `DEPLOYMENT_AND_QUALIFICATION.md` section 5a, which is now the canonical,
+  must-stay-current list of every GX39 tenant-side configuration this tool
+  depends on.
+- This TEST Pilot still does **not** constitute production approval: it ran
+  small ordinary folders/documents only (no Business Workspace route, no file
+  above a few KB, no multipart/large-file path, no corporate PostgreSQL/Azure
+  source). The wider qualification matrix in section 7 below and in
+  `DEPLOYMENT_AND_QUALIFICATION.md` sections 8 and 15 remains required before
+  Full Cutover.
 - Dry Run executes offline preflight before creating a run and rejects missing
   structural/category/owner/workspace mapping prerequisites without requiring
   post-Pilot operational acceptance.
@@ -110,9 +149,11 @@ repository.
   unless one exact active fallback such as `CDM Legacy Owner` is configured
   and the operator approves the displayed exception digest and change record
   at the run boundary. There is no per-file owner mapping and no silent
-  fallback. Owner assignment, provenance applicability/read-back and the
-  ordinary-folder/document and Business Workspace routes remain unqualified
-  against corporate TEST.
+  fallback. Owner assignment and provenance applicability/read-back are now
+  qualified against GX39 TEST for the ordinary-folder/document route (see the
+  2026-09-10 Pilot above). The Business Workspace route (creation, roles,
+  owner assignment and provenance on Business Workspace objects) remains
+  unqualified against corporate TEST.
 
 Use `git log -1 --oneline` to identify the exact checked-out revision. Never
 assume that a release ZIP and the Git checkout are at the same revision.
@@ -166,18 +207,36 @@ The main workflow is:
 
 ## 3. Next corporate qualification: authorized scope
 
-The next run should use the current version and the new owner/provenance
-contract. Its purpose is to qualify the remaining corporate integration
-contracts before production approval; it must not be treated as a production
-run.
+The small ordinary-folder/document Representative Pilot described in section 1
+is now complete and clean on GX39 TEST. The next run should build on the
+current version (commit `e6fbc3f` or later on `main`) and extend qualification
+into the areas that small pilot did **not** cover. It must still not be treated
+as a production run.
 
 Use only:
 
-- a small, non-sensitive folder/workspace in the on-premise DEV database;
+- a small-to-medium, non-sensitive folder/workspace in the on-premise DEV/TEST
+  database, extended to include: at least one Business Workspace, one document
+  with more than one version, and (capacity permitting) one file at or above
+  the 50 MiB multipart threshold;
 - the matching corporate Azure source storage access;
-- an isolated GX39 DEV/TEST destination;
+- an isolated GX39 DEV/TEST destination with `CDM Migration Provenance`
+  re-verified per `DEPLOYMENT_AND_QUALIFICATION.md` section 5a (all date
+  attributes `datetime`, not `date`);
 - a profile classified as `test`, never `production`;
 - a dedicated test migration namespace and duplicate-protection attribute.
+
+Priority order for this next qualification pass:
+
+1. Business Workspace type/template creation, roles and owner/provenance on
+   that route (unqualified — see section 1).
+2. Multipart upload at the 49/50/51 MiB boundaries, at least one 100+ MiB file,
+   and one interrupted-multipart-recovery rehearsal (unqualified).
+3. A representative large file approaching the known production maximum
+   (~7.44 GB) once capacity/approval allow (unqualified).
+4. Measured throughput/latency/429/5xx rates to calibrate concurrency away
+   from the conservative defaults (unqualified — do not tune from Dry Run or
+   from the small Pilot).
 
 Do **not** use production customer content in GX39 DEV/TEST. Production data may
 be used in a lower environment only after explicit data-owner, information
@@ -232,23 +291,31 @@ corporate machine.
 
 ## 5. Corporate contracts still unqualified
 
-The following are explicitly unknown until tested against corporate systems:
+The 2026-09-10 GX39 TEST Pilot (section 1) qualified, for the ordinary
+folder/document route only, small file sizes and short version chains: GX39
+REST shapes for container/document creation, first/subsequent version
+semantics without multipart, category/set/multi-row attribute payloads
+(read and write), exact target owner/creator read-back, source-date/owner
+provenance including ordered version rows, ordinary-route owner-assignment,
+and permission inheritance from the destination for that small sample.
+
+The following remain explicitly unknown until tested against corporate systems
+or at larger scale:
 
 - production PostgreSQL schema/provider data and exact source inventory;
-- Azure locator construction and representative binary access;
-- GX39 REST shapes for container/document creation;
-- first and subsequent version semantics;
-- multipart start/part/complete requests and responses;
-- category, set and multi-row attribute payloads;
-- Business Workspace type/template creation and roles;
-- exact target owner/creator read-back and source-date/owner provenance;
-- provenance category applicability, ordered version rows and read-back;
-- ordinary and Business Workspace owner-assignment routes;
-- permission inheritance and intended-user access;
-- duplicate-attribute indexing delay and ambiguous-create reconciliation;
-- token expiry/renewal behavior;
-- WAF, 429, retry and atypical-use limits;
-- indexing/search delay and production throughput.
+- Azure locator construction and representative binary access at production
+  scale (the DEV Content Server REST adapter path was qualified for small
+  synthetic versions only; direct Azure Blob SAS access remains blocked by an
+  `AuthorizationFailure` — see section 1 history);
+- multipart start/part/complete requests and responses (not exercised by the
+  small Pilot — every file in that run was well under the 50 MiB threshold);
+- Business Workspace type/template creation, roles and the
+  Business-Workspace owner-assignment/provenance route;
+- duplicate-attribute indexing delay and ambiguous-create reconciliation at
+  realistic concurrency;
+- token expiry/renewal behavior under sustained load;
+- WAF, 429, retry and atypical-use limits under production-like concurrency;
+- indexing/search delay and production throughput/duration.
 
 Tenant adaptations belong in `engine/client.py` with regression tests. Do not
 scatter tenant response-shape exceptions through the pipeline.
@@ -272,13 +339,16 @@ remaining hardening work is required.
 
 ### P0 — qualify the owner/provenance replacement contract
 
-- Reproduce the owner-read/write and provenance findings with sanitized fixtures
-  on ordinary folders/documents and every Business Workspace route.
-- Have the GX39 administrator provide and qualify the dedicated provenance
-  category, date precision, set/multi-row payload and read-back contract.
-- Qualify exact login/email matching, service-account creator read-back and the
-  explicitly approved fallback path for deactivated/unresolved owners.
-- Exercise lost-response and interruption recovery after owner/provenance writes.
+- Ordinary folders/documents: **done** — qualified against GX39 TEST by the
+  2026-09-10 Pilot (section 1). Owner read/write, provenance category
+  read/write (including per-version date precision), and duplicate-attribute
+  reconciliation are confirmed working end-to-end for that route.
+- Business Workspace route: still open — reproduce the same owner/provenance
+  read/write and category/date-precision checks for every Business Workspace
+  type/template used in scope.
+- Exercise lost-response and interruption recovery after owner/provenance
+  writes at realistic concurrency (the small Pilot ran with default
+  conservative concurrency and did not exercise recovery mid-run).
 - Keep GX39 contract changes isolated in `engine/client.py`.
 - Add regression tests before changing the pipeline.
 - Rerun the complete quality suite and the affected corporate test.
@@ -370,13 +440,16 @@ Validation runs against production.
 
 ## 8. Recommended qualification sequence after the smoke test
 
-1. Fix and regression-test real corporate contract findings.
+1. Fix and regression-test real corporate contract findings. **Done** for the
+   ordinary folder/document route (see section 1, 2026-09-10 Pilot).
 2. Build and run the synthetic fidelity dataset in Content Server DEV.
 3. Qualify exact owner resolution, `Owned By`, `Created By` and
    `CDM Migration Provenance` on ordinary and Business Workspace routes,
-   including an approved fallback.
+   including an approved fallback. **Done for the ordinary route; Business
+   Workspace still open.**
 4. Exercise multipart interruption, token expiry and ambiguous-create recovery
-   after metadata writes.
+   after metadata writes. **Still open — the 2026-09-10 Pilot used only small
+   single-part files.**
 5. Run a synthetic scale test if resources and OpenText limits allow it.
 6. Complete the GX39 TEST acceptance matrix.
 7. Add and complete Source Integrity Validation against the intended production

@@ -9,6 +9,7 @@ config.json
 migration_state*.db*
 *.instance.lock
 *.log
+server_log.txt
 .env
 .DS_Store
 .idea/
