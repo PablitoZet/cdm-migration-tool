@@ -93,6 +93,13 @@ Open **Migration Setup** for each profile and enter:
 ### Source Content Server
 
 - PostgreSQL host, database, user and password;
+- **PostgreSQL schema** (optional, defaults to `public`): the schema that owns
+  the Content Server tables (`DTree`, `DVersData`, `ProviderData`,
+  `LLAttrData`, `KUAF`). Some on-prem databases place these tables in a
+  non-default schema (for example `cs`) even though the database itself is
+  also named `cs` — check `information_schema.schemata` if `Test Connection`
+  reports the source table as missing. This value differs between
+  environments and must be qualified per profile; see section 5a.
 - **Source root DataID**: a supported folder or workspace whose entire subtree
   is in scope.
 
@@ -239,6 +246,29 @@ in any qualified tenant — do not let this drift from what is actually deployed
 Corporate-machine qualification (`DEPLOYMENT_AND_QUALIFICATION.md` section 8)
 must re-confirm points 1-6 explicitly for the production GX39 tenant before
 Full Cutover; do not assume TEST tenant configuration was copied correctly.
+
+## 5b. Required on-prem source configuration (must be reproduced per environment)
+
+Unlike section 5a, these are on-prem Content Server/PostgreSQL settings, not
+GX39 tenant settings — but they are just as easy to lose track of between a
+TEST source and the production source, so they are recorded here too.
+
+1. **PostgreSQL schema** (`db_schema` profile field, default `public`): the
+   TEST source database exposes `DTree`/`DVersData`/`ProviderData`/
+   `LLAttrData`/`KUAF` in schema `public`. The production source database was
+   found to expose the same tables in a different schema (`cs`) even though
+   the database itself is also named `cs` — a genuine, previously-unknown
+   environment difference (see `CORPORATE_HANDOFF.md`). Set `db_schema`
+   explicitly per profile and confirm with `Test Connection` before scanning;
+   do not assume TEST and production share the same schema.
+
+2. **On-prem migration service account permissions**: grant the on-prem
+   Content Server account used for PostgreSQL and Archive Center REST reads
+   only **See** and **See Contents** on the migration source subtree. Do not
+   grant `Managers`, `Modify`, `Delete` or `Modify Permissions` — the source is
+   read-only per AGENTS.md invariant #1/#2 and the tool never needs write
+   access on-prem. Validate the minimal-permission account with Dry Run and a
+   small Pilot before relying on it for Full Cutover.
 
 ## 6. Scan and offline readiness
 

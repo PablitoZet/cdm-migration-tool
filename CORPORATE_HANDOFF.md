@@ -155,6 +155,21 @@ repository.
   owner assignment and provenance on Business Workspace objects) remains
   unqualified against corporate TEST.
 
+- When the operator pointed the production profile at real production
+  PostgreSQL credentials (source only; cloud/target temporarily still GX39
+  TEST for safe testing), `Test Connection` failed with `relation
+  "public.dtree" does not exist`. Diagnosis found that production `DTree` (and
+  the other Content Server tables) live in schema **`cs`**, not `public`,
+  while TEST uses `public` — a genuine, previously-unknown environment
+  difference; both environments share the same non-helpful
+  `search_path = "$user", public"`. `engine/db.py` previously hardcoded
+  `public.` everywhere. Added a `db_schema` profile field (default `public`,
+  validated against a plain-identifier pattern before use in SQL) that
+  qualifies every source query; set to `cs` for the production profile. See
+  `DEPLOYMENT_AND_QUALIFICATION.md` section 5b for the operator-facing
+  contract and regression tests in `tests/test_engine_v2.py` for the
+  schema-qualification behavior itself.
+
 Use `git log -1 --oneline` to identify the exact checked-out revision. Never
 assume that a release ZIP and the Git checkout are at the same revision.
 
@@ -302,7 +317,10 @@ and permission inheritance from the destination for that small sample.
 The following remain explicitly unknown until tested against corporate systems
 or at larger scale:
 
-- production PostgreSQL schema/provider data and exact source inventory;
+- production PostgreSQL provider data and exact source inventory (the schema
+  *name* difference itself is now qualified and configurable — see section 1
+  and `DEPLOYMENT_AND_QUALIFICATION.md` section 5b — but the production tables'
+  actual contents, `ProviderData` values and inventory counts remain unread);
 - Azure locator construction and representative binary access at production
   scale (the DEV Content Server REST adapter path was qualified for small
   synthetic versions only; direct Azure Blob SAS access remains blocked by an

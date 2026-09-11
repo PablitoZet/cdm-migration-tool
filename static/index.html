@@ -523,6 +523,9 @@
             <label class="col-span-2">PostgreSQL host<input id="pf-db-host" class="field"></label>
             <label>Database<input id="pf-db-name" class="field" placeholder="cs"></label>
             <label>User<input id="pf-db-user" class="field"></label>
+            <label class="col-span-2">DB schema<input id="pf-db-schema" class="field" placeholder="public">
+              <span class="block text-[10px] text-slate-500 mt-1">Optional. PostgreSQL schema holding the Content Server tables (DTree, DVersData, KUAF, ...). Defaults to "public"; some on-prem databases use a different schema (e.g. "cs").</span>
+            </label>
             <label class="col-span-2">Password<input id="pf-db-password" type="password" class="field" autocomplete="new-password"></label>
             <label class="col-span-2">Source root DataID<input id="pf-source-root" type="number" class="field">
               <span class="block text-[10px] text-slate-500 mt-1">DataID of the folder or workspace to migrate. The complete subtree below this object is included.</span>
@@ -1679,6 +1682,7 @@
       setValue('pf-target-root', profile.target_workspace_nodeid);
       setValue('pf-db-host', profile.db_host);
       setValue('pf-db-name', profile.db_name || 'cs');
+      setValue('pf-db-schema', profile.db_schema || '');
       setValue('pf-db-user', profile.db_user);
       setValue('pf-source-cs-url', profile.source_cs_url);
       setValue('pf-source-cs-user', profile.source_cs_user);
@@ -1830,6 +1834,7 @@
         db_host: document.getElementById('pf-db-host').value.trim(),
         db_port: 5432,
         db_name: document.getElementById('pf-db-name').value.trim() || 'cs',
+        db_schema: document.getElementById('pf-db-schema').value.trim() || 'public',
         db_user: document.getElementById('pf-db-user').value.trim(),
         sslmode: 'require',
         source_cs_url: document.getElementById('pf-source-cs-url').value.trim(),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -20,11 +21,19 @@ SUBTYPE_NAMES = {
     849: "Business Workspace Subtype", 899: "Business Workspace Template",
 }
 
+SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 class SourceDB:
     def __init__(self, db_config: Any):
         get = db_config.get
         self.config = db_config
+        schema = str(get("db_schema", "public") or "public").strip()
+        if not SCHEMA_NAME_PATTERN.match(schema):
+            raise RuntimeError(
+                f"Invalid db_schema {schema!r}: must be a plain PostgreSQL identifier"
+            )
+        self._schema = schema
         self.connection_args = {
             "host": get("db_host"), "port": int(get("db_port", 5432)),
             "dbname": get("db_name", "cs"), "user": get("db_user"),
@@ -65,7 +74,7 @@ class SourceDB:
                 with conn.cursor() as cur:
                     cur.execute("SELECT version(), current_database(), current_user")
                     version, database, user = cur.fetchone()
-                    cur.execute("SELECT COUNT(*) FROM public.DTree")
+                    cur.execute(f"SELECT COUNT(*) FROM {self._schema}.DTree")
                     count = cur.fetchone()[0]
                 return {
                     "status": "connected", "version": version, "database": database,
@@ -127,13 +136,13 @@ class SourceDB:
                        d.OwnerID,d.PermID,{root_reference} reference_source_id,{root_url} url_value,
                        {root_description} description_value,{root_reserved} reserved_by,
                        0 AS depth,ARRAY[d.DataID] AS path_ids,d.Name::text AS full_path
-                  FROM public.DTree d WHERE d.DataID=%s AND COALESCE(d.Deleted,0)=0
+                  FROM {self._schema}.DTree d WHERE d.DataID=%s AND COALESCE(d.Deleted,0)=0
                 UNION ALL
                 SELECT c.DataID,c.ParentID,c.Name,c.SubType,c.CreateDate,c.ModifyDate,
                        c.OwnerID,c.PermID,{child_reference},{child_url},
                        {child_description},{child_reserved},
                        w.depth+1,w.path_ids||c.DataID,(w.full_path||'/'||c.Name)::text
-                  FROM public.DTree c JOIN workspace_tree w ON c.ParentID=w.DataID
+                  FROM {self._schema}.DTree c JOIN workspace_tree w ON c.ParentID=w.DataID
                  WHERE COALESCE(c.Deleted,0)=0 AND NOT c.DataID=ANY(w.path_ids)
             )
             SELECT DataID source_id,ParentID parent_source_id,Name name,SubType subtype,
@@ -172,7 +181,7 @@ class SourceDB:
                 if self._column_exists(conn, "providerdata", "providertype")
                 else "NULL::text"
             )
-            provider_data_join = "LEFT JOIN public.ProviderData p ON p.ProviderID=d.ProviderID"
+            provider_data_join = f"LEFT JOIN {self._schema}.ProviderData p ON p.ProviderID=d.ProviderID"
         else:
             provider_data_expr = "NULL::text"
             provider_type_expr = "NULL::text"
@@ -197,7 +206,7 @@ class SourceDB:
                    d.VerCDate ver_create_date,d.VerMDate ver_modify_date,d.FileMDate ver_file_date,
                    {version_id_expr} version_id,
                    {comment_expr} version_comment
-              FROM public.DVersData d
+              FROM {self._schema}.DVersData d
               {provider_data_join}
              WHERE d.DocID=ANY(%s)
                    {primary_filter}
@@ -245,7 +254,7 @@ class SourceDB:
             SELECT a.ID source_id,a.DefID def_id,d.Name cat_name,a.AttrID attr_id,
                    {row_expr} row_num,a.ValStr val_str,a.ValLong val_long,a.ValDate val_date,
                    {real_expr} val_real,{int_expr} val_int
-              FROM public.LLAttrData a LEFT JOIN public.DTree d ON a.DefID=d.DataID
+              FROM {self._schema}.LLAttrData a LEFT JOIN {self._schema}.DTree d ON a.DefID=d.DataID
              WHERE a.ID=ANY(%s) ORDER BY a.ID,a.DefID,a.AttrID,{row_expr}
         """
         with self._cursor(conn) as cur:
@@ -312,7 +321,7 @@ class SourceDB:
                    {expression(active_column)} active_value,
                    {expression(status_column)} status_value,
                    {expression(type_column)} type_value
-              FROM public.KUAF k
+              FROM {self._schema}.KUAF k
              WHERE k.{id_column}=ANY(%s)
              ORDER BY k.{id_column}
         """
@@ -388,20 +397,18 @@ class SourceDB:
                 return False, "status"
         return None, "status"
 
-    @staticmethod
-    def _column_exists(conn, table: str, column: str) -> bool:
+    def _column_exists(self, conn, table: str, column: str) -> bool:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND lower(table_name)=%s AND lower(column_name)=%s""",
-                (table.lower(), column.lower()),
+                   WHERE table_schema=%s AND lower(table_name)=%s AND lower(column_name)=%s""",
+                (self._schema, table.lower(), column.lower()),
             )
             return cur.fetchone() is not None
 
-    @classmethod
-    def _first_existing_column(cls, conn, table: str, candidates: tuple[str, ...]) -> str | None:
+    def _first_existing_column(self, conn, table: str, candidates: tuple[str, ...]) -> str | None:
         for candidate in candidates:
-            if cls._column_exists(conn, table, candidate):
+            if self._column_exists(conn, table, candidate):
                 return candidate
         return None
 

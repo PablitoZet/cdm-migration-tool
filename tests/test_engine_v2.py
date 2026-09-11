@@ -278,7 +278,9 @@ class _VersionCursor:
 
     def execute(self, query, params):
         if "information_schema.columns" in query:
-            self.rows = [(1,)] if tuple(params) in self.connection.columns else []
+            # params may be (table, column) or (schema, table, column) depending on
+            # whether the query is schema-qualified.
+            self.rows = [(1,)] if tuple(params)[-2:] in self.connection.columns else []
         else:
             self.connection.version_query = query
             self.rows = self.connection.version_rows
@@ -416,6 +418,25 @@ class SourceExtractionTests(unittest.TestCase):
         connection = _VersionConnection([_version_row(), {**_version_row(), "file_name": "other.bin"}])
         with self.assertRaisesRegex(RuntimeError, "duplicate primary DVersData"):
             _TestSourceDB({})._extract_versions(connection, [3])
+
+    def test_db_schema_defaults_to_public(self):
+        source = _TestSourceDB({})
+        self.assertEqual(source._schema, "public")
+
+    def test_db_schema_is_configurable_and_qualifies_queries(self):
+        connection = _VersionConnection([_version_row()])
+        rows = _TestSourceDB({
+            "db_schema": "cs",
+            "azure_blob_locator_template": "azure://content/{provider_data}",
+        })._extract_versions(connection, [3])
+
+        self.assertIn("LEFT JOIN cs.ProviderData p ON p.ProviderID=d.ProviderID", connection.version_query)
+        self.assertIn("FROM cs.DVersData d", connection.version_query)
+        self.assertEqual(rows[0]["blob_locator"], "azure://content/blob/content.bin")
+
+    def test_db_schema_rejects_unsafe_identifiers(self):
+        with self.assertRaisesRegex(RuntimeError, "Invalid db_schema"):
+            _TestSourceDB({"db_schema": "public; DROP TABLE DTree;--"})
 
 
 class ProvenanceTests(unittest.TestCase):

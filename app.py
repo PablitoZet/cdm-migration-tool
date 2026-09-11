@@ -137,7 +137,7 @@ class FreezeRequest(BaseModel):
 PROFILE_EDITABLE_KEYS = {
     "name", "workspace_title", "environment_class",
     "source_workspace_nodeid", "target_workspace_nodeid", "source_root_maps_to_target",
-    "db_host", "db_port", "db_name", "db_user", "db_password_env", "sslmode",
+    "db_host", "db_port", "db_name", "db_schema", "db_user", "db_password_env", "sslmode",
     "db_connect_timeout", "db_statement_timeout_ms",
     "source_cs_url", "source_cs_user", "source_cs_password_env", "source_read_timeout_seconds",
     "binary_source_adapter", "azure_storage_account_url", "azure_storage_sas_token_env",
