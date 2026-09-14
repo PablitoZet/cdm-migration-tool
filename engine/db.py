@@ -130,6 +130,14 @@ class SourceDB:
         child_description = f"c.{description_column}" if description_column else "''::text"
         root_reserved = f"d.{reserved_column}" if reserved_column else "NULL::integer"
         child_reserved = f"c.{reserved_column}" if reserved_column else "NULL::integer"
+        # In the observed classic CS schema, workspace W (848) stores content
+        # below -W (849, ParentID=-1). Visit that source-only container without
+        # adding a visible depth/path segment; retain both IDs in the cycle guard.
+        # Public REST docs do not confirm this DB convention: validate every pair
+        # in Python before returning any inventory. ParentID permits a workspace
+        # anywhere in the tree, so apply the jump at every depth, including nested
+        # workspaces; no documented restriction justifies handling only the root.
+        shadow_jump = "w.SubType=848 AND c.DataID=-w.DataID"
         query = f"""
             WITH RECURSIVE workspace_tree AS (
                 SELECT d.DataID,d.ParentID,d.Name,d.SubType,d.CreateDate,d.ModifyDate,
@@ -141,8 +149,12 @@ class SourceDB:
                 SELECT c.DataID,c.ParentID,c.Name,c.SubType,c.CreateDate,c.ModifyDate,
                        c.OwnerID,c.PermID,{child_reference},{child_url},
                        {child_description},{child_reserved},
-                       w.depth+1,w.path_ids||c.DataID,(w.full_path||'/'||c.Name)::text
-                  FROM {self._schema}.DTree c JOIN workspace_tree w ON c.ParentID=w.DataID
+                       CASE WHEN {shadow_jump} THEN w.depth ELSE w.depth+1 END,
+                       w.path_ids||c.DataID,
+                       CASE WHEN {shadow_jump} THEN w.full_path
+                            ELSE (w.full_path||'/'||c.Name)::text END
+                  FROM {self._schema}.DTree c JOIN workspace_tree w
+                    ON c.ParentID=w.DataID OR ({shadow_jump})
                  WHERE COALESCE(c.Deleted,0)=0 AND NOT c.DataID=ANY(w.path_ids)
             )
             SELECT DataID source_id,ParentID parent_source_id,Name name,SubType subtype,
@@ -155,6 +167,7 @@ class SourceDB:
         with self._cursor(conn) as cur:
             cur.execute(query, (root_node_id,))
             rows = [dict(row) for row in cur.fetchall()]
+        rows = self._normalize_workspace_containers(rows)
         for row in rows:
             row["type_name"] = SUBTYPE_NAMES.get(row["subtype"], f"Type_{row['subtype']}")
             row["extra"] = {
@@ -165,6 +178,51 @@ class SourceDB:
                 }.items() if value is not None
             }
         return rows
+
+    @staticmethod
+    def _normalize_workspace_containers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Validate source-only workspace containers and expose real parent IDs."""
+        by_id = {row["source_id"]: row for row in rows}
+        if len(by_id) != len(rows):
+            raise RuntimeError("Source tree contains repeated DataIDs; a lossless manifest cannot be created")
+        shadow_to_workspace: dict[int, int] = {}
+        for workspace in rows:
+            if workspace["subtype"] != 848:
+                continue
+            workspace_id = int(workspace["source_id"])
+            if workspace_id <= 0:
+                raise RuntimeError(f"Business Workspace {workspace_id} must have a positive DataID")
+            shadow_id = -workspace_id
+            shadow = by_id.get(shadow_id)
+            if shadow is None:
+                raise RuntimeError(
+                    f"Business Workspace {workspace_id} is missing its active shadow container "
+                    f"{shadow_id}; cannot scan a complete workspace"
+                )
+            if shadow["subtype"] != 849 or shadow["parent_source_id"] != -1:
+                raise RuntimeError(
+                    f"Business Workspace {workspace_id} has an invalid shadow container {shadow_id}: "
+                    "expected SubType=849 and ParentID=-1; source layout must be qualified"
+                )
+            if shadow["depth"] != workspace["depth"] or shadow["path"] != workspace["path"]:
+                raise RuntimeError(
+                    f"Business Workspace {workspace_id} has an inconsistent shadow container path/depth"
+                )
+            shadow_to_workspace[shadow_id] = workspace_id
+        result = []
+        for row in rows:
+            if row["source_id"] in shadow_to_workspace:
+                continue
+            if row["subtype"] == 849:
+                raise RuntimeError(
+                    f"Unexpected Business Workspace shadow container {row['source_id']}; "
+                    "no matching in-scope workspace"
+                )
+            parent_id = row["parent_source_id"]
+            if parent_id in shadow_to_workspace:
+                row["parent_source_id"] = shadow_to_workspace[parent_id]
+            result.append(row)
+        return result
 
     def _extract_versions(self, conn, node_ids: list[int]) -> list[dict[str, Any]]:
         if self._column_exists(conn, "dversdata", "providerdata"):

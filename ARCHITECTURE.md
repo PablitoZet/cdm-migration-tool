@@ -177,8 +177,23 @@ the whole run, guarantees no container loses the migration account's ACL
 entry before all of its descendants exist.
 
 Business Workspace subtype 848 uses the target Business Workspace API and
-requires a configured target type/template route. Unknown container subtypes are
-terminal errors.
+requires a configured target type/template route. On the source side,
+`engine/db.py` also follows each workspace W to its source-only shadow container
+at DataID -W, including workspaces encountered below ordinary folders or other
+workspaces. The shadow shares the workspace's logical depth/path while both IDs
+remain in the recursive cycle guard. Python validates that every workspace has
+an active shadow of subtype 849 with ParentID -1, excludes that row from the
+inventory, and rewrites its direct children's `parent_source_id` to W. Deeper
+ordinary descendants retain their existing parent chain; no shadow ID is
+created or mapped on GX39. Missing/invalid pairs, unexpected shadow rows and
+repeated DataIDs fail extraction before an inventory can be imported.
+
+The negative-DataID layout is a source database observation recorded in the
+task brief, not a contract confirmed by the public OpenText REST reference.
+Traversal is implemented and tested with fake cursors; actual PostgreSQL
+recursion, completeness and workspace target behavior require corporate TEST
+qualification. See `BUSINESS_WORKSPACE_IMPLEMENTATION_REPORT.md` for the
+verification checklist. Unknown container subtypes remain terminal errors.
 
 ## Idempotency and ambiguous commits
 

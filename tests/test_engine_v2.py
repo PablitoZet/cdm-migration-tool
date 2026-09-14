@@ -6,7 +6,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +20,7 @@ from engine.config import (
 )
 from engine.db import SourceDB
 from engine.instance_lock import InstanceAlreadyRunning
+from engine.inventory import discovery_summary
 from engine.manifest import ManifestStore, StateConflict
 from engine.models import (
     ItemState,
@@ -283,6 +284,7 @@ class _VersionCursor:
             self.rows = [(1,)] if tuple(params)[-2:] in self.connection.columns else []
         else:
             self.connection.version_query = query
+            self.connection.query_params = params
             self.rows = self.connection.version_rows
 
     def fetchone(self):
@@ -366,7 +368,218 @@ def _version_row(provider_data="blob/content.bin", provider_type="azureblob"):
     }
 
 
+def _node_row(source_id, parent_id, subtype, depth, path):
+    return {
+        "source_id": source_id, "parent_source_id": parent_id,
+        "name": path.rsplit("/", 1)[-1], "subtype": subtype,
+        "depth": depth, "path": path, "description": "original description",
+        "create_date": "2020-01-01T12:00:00Z", "modify_date": "2021-01-01T13:00:00Z",
+        "owner_id": -42, "group_id": None, "permissions_id": 7,
+        "reference_source_id": None, "url_value": None, "reserved_by": None,
+    }
+
+
+def _workspace_rows():
+    # Canned CTE output: the shadow shares its workspace's logical depth/path,
+    # even though its actual name/ParentID are unrelated to the visible tree.
+    shadow = {**_node_row(-100, -1, 849, 0, "Workspace"), "name": "Hidden container"}
+    return [
+        shadow, _node_row(100, 9, 848, 0, "Workspace"),
+        _node_row(101, -100, 0, 1, "Workspace/Folder"),
+        _node_row(102, -100, 144, 1, "Workspace/Direct.txt"),
+        _node_row(103, 101, 0, 2, "Workspace/Folder/Inner"),
+        _node_row(104, 103, 144, 3, "Workspace/Folder/Inner/Deep.txt"),
+    ]
+
+
 class SourceExtractionTests(unittest.TestCase):
+    def test_ordinary_node_extraction_preserves_hierarchy_metadata_and_query_branch(self):
+        original = [
+            _node_row(1, 9, 0, 0, "Root"),
+            _node_row(2, 1, 0, 1, "Root/Folder"),
+            {**_node_row(3, 2, 1, 2, "Root/Folder/Shortcut"), "reference_source_id": 2},
+        ]
+        connection = _VersionConnection(original)
+        rows = _TestSourceDB({})._extract_nodes(connection, 1)
+
+        expected = [{
+            **{key: value for key, value in row.items()
+               if key not in ("reference_source_id", "url_value", "reserved_by")},
+            "type_name": "Shortcut" if row["subtype"] == 1 else "Folder",
+            "extra": {"reference_source_id": 2} if row["subtype"] == 1 else {},
+        } for row in original]
+        self.assertEqual(rows, expected)
+        self.assertEqual(connection.query_params, (1,))
+        self.assertIn("FROM public.DTree d WHERE d.DataID=%s AND COALESCE(d.Deleted,0)=0", connection.version_query)
+        self.assertIn("ON c.ParentID=w.DataID OR (w.SubType=848 AND c.DataID=-w.DataID)", connection.version_query)
+        self.assertIn("ELSE w.depth+1 END", connection.version_query)
+        self.assertIn("ELSE (w.full_path||'/'||c.Name)::text END", connection.version_query)
+        self.assertIn("ORDER BY depth,source_id", connection.version_query)
+
+    def test_workspace_root_excludes_shadow_and_remaps_only_direct_children(self):
+        original = _workspace_rows()
+        connection = _VersionConnection(original)
+        rows = _TestSourceDB({"db_schema": "cs"})._extract_nodes(connection, 100)
+        by_id = {row["source_id"]: row for row in rows}
+
+        self.assertEqual(set(by_id), {100, 101, 102, 103, 104})
+        self.assertEqual(by_id[100]["parent_source_id"], 9)
+        self.assertEqual(by_id[101]["parent_source_id"], 100)
+        self.assertEqual(by_id[102]["parent_source_id"], 100)
+        self.assertEqual(by_id[103]["parent_source_id"], 101)
+        self.assertEqual(by_id[104]["parent_source_id"], 103)
+        self.assertEqual([row["depth"] for row in rows], [0, 1, 1, 2, 3])
+        self.assertEqual(by_id[104]["path"], "Workspace/Folder/Inner/Deep.txt")
+        self.assertEqual(by_id[100]["name"], "Workspace")
+        self.assertEqual(by_id[100]["description"], "original description")
+        self.assertEqual(by_id[100]["owner_id"], -42)
+        self.assertEqual(original[2]["parent_source_id"], -100)  # No mutation of driver rows.
+        self.assertEqual(discovery_summary(rows, [], [])["max_depth"], 3)
+        self.assertIn("FROM cs.DTree c JOIN workspace_tree w", connection.version_query)
+        self.assertNotIn("public.DTree", connection.version_query)
+        self.assertEqual(connection.query_params, (100,))
+        # SQL-text checks only; fake cursors do not execute PostgreSQL recursion.
+        self.assertIn("THEN w.depth ELSE w.depth+1 END", connection.version_query)
+        self.assertIn("THEN w.full_path", connection.version_query)
+        self.assertIn("w.path_ids||c.DataID", connection.version_query)
+        self.assertIn("COALESCE(c.Deleted,0)=0 AND NOT c.DataID=ANY(w.path_ids)", connection.version_query)
+
+    def test_workspace_missing_active_shadow_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "Business Workspace 100.*missing.*-100"):
+            _TestSourceDB({})._extract_nodes(_VersionConnection([_workspace_rows()[1]]), 100)
+
+    def test_empty_workspace_with_valid_shadow_is_allowed(self):
+        rows = _TestSourceDB({})._extract_nodes(_VersionConnection(_workspace_rows()[:2]), 100)
+        self.assertEqual([row["source_id"] for row in rows], [100])
+
+    def test_invalid_workspace_shadow_fails_closed(self):
+        for changes, message in [
+            ({"subtype": 0}, "invalid shadow container -100"),
+            ({"parent_source_id": 9}, "invalid shadow container -100"),
+            ({"depth": 1}, "inconsistent shadow container path/depth"),
+            ({"path": "Hidden"}, "inconsistent shadow container path/depth"),
+        ]:
+            with self.subTest(changes=changes):
+                original = _workspace_rows()
+                original[0].update(changes)
+                with self.assertRaisesRegex(RuntimeError, f"Business Workspace 100.*{message}"):
+                    _TestSourceDB({})._extract_nodes(_VersionConnection(original), 100)
+
+    def test_nested_workspace_remaps_at_its_own_depth(self):
+        original = _workspace_rows() + [
+            _node_row(-200, -1, 849, 2, "Workspace/Folder/Nested"),
+            _node_row(200, 101, 848, 2, "Workspace/Folder/Nested"),
+            _node_row(201, -200, 0, 3, "Workspace/Folder/Nested/Child"),
+            _node_row(202, 201, 144, 4, "Workspace/Folder/Nested/Child/Doc.txt"),
+        ]
+        original.sort(key=lambda row: (row["depth"], row["source_id"]))
+        rows = _TestSourceDB({})._extract_nodes(_VersionConnection(original), 100)
+        by_id = {row["source_id"]: row for row in rows}
+        self.assertNotIn(-100, by_id)
+        self.assertNotIn(-200, by_id)
+        self.assertEqual(by_id[200]["parent_source_id"], 101)
+        self.assertEqual(by_id[201]["parent_source_id"], 200)
+        self.assertEqual(by_id[202]["parent_source_id"], 201)
+        self.assertEqual(by_id[201]["depth"], 3)
+        self.assertEqual(by_id[202]["path"], "Workspace/Folder/Nested/Child/Doc.txt")
+        with self.assertRaisesRegex(RuntimeError, "Business Workspace 200.*missing.*-200"):
+            _TestSourceDB({})._extract_nodes(
+                _VersionConnection([row for row in original if row["source_id"] != -200]), 100
+            )
+
+    def test_workspace_inside_ordinary_root_is_normalized(self):
+        original = _workspace_rows()
+        for row in original:
+            row["depth"] += 1
+            row["path"] = "Root/" + row["path"]
+        original[1]["parent_source_id"] = 1
+        original.insert(0, _node_row(1, 9, 0, 0, "Root"))
+        rows = _TestSourceDB({})._extract_nodes(_VersionConnection(original), 1)
+        self.assertEqual([row["source_id"] for row in rows], [1, 100, 101, 102, 103, 104])
+        self.assertEqual(rows[1]["parent_source_id"], 1)
+        self.assertEqual(rows[2]["parent_source_id"], 100)
+        self.assertEqual(rows[-1]["depth"], 4)
+
+    def test_unpaired_shadow_and_nonpositive_workspace_fail_closed(self):
+        for row, message in [
+            (_node_row(-100, -1, 849, 0, "Hidden"), "Unexpected.*-100"),
+            (_node_row(-100, 9, 848, 0, "Workspace"), "Business Workspace -100.*positive DataID"),
+            (_node_row(0, 9, 848, 0, "Workspace"), "Business Workspace 0.*positive DataID"),
+        ]:
+            with (
+                self.subTest(source_id=row["source_id"], subtype=row["subtype"]),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                _TestSourceDB({})._extract_nodes(_VersionConnection([row]), row["source_id"])
+
+    def test_repeated_tree_identity_fails_closed(self):
+        original = _workspace_rows()
+        original.append(dict(original[1]))
+        with self.assertRaisesRegex(RuntimeError, "repeated DataIDs"):
+            _TestSourceDB({})._extract_nodes(_VersionConnection(original), 100)
+
+    def test_extract_all_never_requests_shadow_metadata(self):
+        source = _TestSourceDB({})
+        connection = _VersionConnection(_workspace_rows())
+        with (
+            patch.object(source, "snapshot", return_value=nullcontext((connection, "test-snapshot"))),
+            patch.object(source, "_extract_versions", return_value=[]) as versions,
+            patch.object(source, "_extract_categories", return_value=[]) as categories,
+            patch.object(source, "_extract_owners", return_value=[]) as owners,
+        ):
+            extracted = source.extract_all(100)
+        versions.assert_called_once_with(connection, [100, 101, 102, 103, 104])
+        categories.assert_called_once_with(connection, [100, 101, 102, 103, 104])
+        owners.assert_called_once_with(connection, [-42])
+        self.assertEqual(len(extracted["nodes"]), 5)
+        self.assertTrue(extracted["source_signature"])
+
+    def test_workspace_manifest_pilot_keeps_real_ancestors_and_parent_dependencies(self):
+        original = [row for row in _workspace_rows() if row["source_id"] != 102]
+        nodes = _TestSourceDB({})._extract_nodes(_VersionConnection(original), 100)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            closing(ManifestStore(str(Path(tmp) / "state.db"))) as store,
+        ):
+            store.import_extracted_data(
+                nodes, [{**_version_row(), "doc_source_id": 104}], [],
+                source_root_id=100, source_profile_id="test",
+                owners=[{
+                    "source_owner_id": -42, "login": "source-owner",
+                    "email": "owner@example.invalid", "active": True, "identity_status": "KNOWN",
+                }],
+            )
+            self.assertEqual(store.inventory_summary()["total_nodes"], 4)
+            run_id = store.create_run(
+                "test", RunMode.PILOT, 9000, max_documents=1,
+                owner_resolutions=[OwnerResolution(
+                    -42, OwnerIdentity(
+                        -42, login="source-owner", email="owner@example.invalid",
+                        active=True, identity_status="KNOWN",
+                    ).fingerprint, 4200, "EXACT",
+                )],
+            )
+            store.start_run(run_id)
+            with store.connection() as conn:
+                selected = {row[0] for row in conn.execute("SELECT source_id FROM run_items")}
+            self.assertEqual(selected, {100, 101, 103, 104})
+            for source_id, target_id, target_parent_id in [(100, 9100, 9000), (101, 9101, 9100), (103, 9103, 9101)]:
+                with self.subTest(source_id=source_id):
+                    self.assertIsNone(store.claim_next(run_id, "DOCUMENT", "worker"))
+                    item = store.claim_next(run_id, "CONTAINER", "worker")
+                    self.assertEqual(item["source_id"], source_id)
+                    self.assertEqual(store.resolve_parent(item["parent_source_id"], 9000), target_parent_id)
+                    store.commit_mapping(
+                        run_id, source_id, target_id, target_parent_id,
+                        f"CDM:test:{source_id}", worker_id="worker",
+                    )
+                    store.mark_state(run_id, source_id, ItemState.OWNER_PENDING, worker_id="worker")
+            document = store.claim_next(run_id, "DOCUMENT", "worker")
+            self.assertEqual(document["source_id"], 104)
+            self.assertEqual(store.resolve_parent(document["parent_source_id"], 9000), 9103)
+            with store.connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM id_mapping WHERE source_id<0").fetchone()[0], 0)
+
     def test_negative_dtree_owner_id_resolves_positive_kuaf_identity(self):
         connection = _OwnerConnection([{
             "kuaf_id": 228908,
