@@ -79,7 +79,7 @@ def discovery_summary(
     return {
         "root": nodes[0] if nodes else None,
         "nodes": len(nodes),
-        "documents": sum(node.get("subtype") in (136, 144, 154, 751) for node in nodes),
+        "documents": sum(node.get("subtype") in (136, 144, 154, 749, 751) for node in nodes),
         "containers": sum(node.get("subtype") in (0, 202, 298, 848, 899) for node in nodes),
         "references": sum(node.get("subtype") in (1, 140) for node in nodes),
         "active_reservations": sum(

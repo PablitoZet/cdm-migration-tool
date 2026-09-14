@@ -164,7 +164,7 @@ class PreflightAuditor:
             ).fetchone()[0]
             unsupported = conn.execute(
                 "SELECT COUNT(*) FROM manifest_nodes "
-                f"WHERE subtype NOT IN (0,1,136,140,144,154,202,298,751,848){node_scope}",
+                f"WHERE subtype NOT IN (0,1,136,140,144,154,202,298,749,751,848){node_scope}",
                 node_params,
             ).fetchone()[0]
             workspaces = [dict(row) for row in conn.execute(

@@ -54,7 +54,7 @@ TERMINAL_STATES = {
 
 
 CONTAINER_TYPES = frozenset({0, 202, 298, 848, 899})
-DOCUMENT_TYPES = frozenset({136, 144, 154, 751})
+DOCUMENT_TYPES = frozenset({136, 144, 154, 749, 751})
 REFERENCE_TYPES = frozenset({1, 140})
 
 

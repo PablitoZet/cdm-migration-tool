@@ -438,6 +438,21 @@ class SourceExtractionTests(unittest.TestCase):
         self.assertIn("FROM cs.DTree c JOIN workspace_tree w", connection.version_query)
         self.assertNotIn("public.DTree", connection.version_query)
         self.assertEqual(connection.query_params, (100,))
+
+    def test_email_message_subtype_is_named_and_counted_as_a_document(self):
+        original = [
+            _node_row(1, 9, 0, 0, "Root"),
+            _node_row(2, 1, 749, 1, "Root/Message.msg"),
+        ]
+        connection = _VersionConnection(original)
+        rows = _TestSourceDB({})._extract_nodes(connection, 1)
+        by_id = {row["source_id"]: row for row in rows}
+
+        self.assertEqual(by_id[2]["type_name"], "Email Message")
+        summary = discovery_summary(rows, [], [])
+        self.assertEqual(summary["documents"], 1)
+        self.assertEqual(summary["containers"], 1)
+        self.assertEqual(summary["subtypes"], {"0:Folder": 1, "749:Email Message": 1})
         # SQL-text checks only; fake cursors do not execute PostgreSQL recursion.
         self.assertIn("THEN w.depth ELSE w.depth+1 END", connection.version_query)
         self.assertIn("THEN w.full_path", connection.version_query)
@@ -777,6 +792,46 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(report["failure_count"], 0)
             self.assertTrue(report["checks"])
             self.assertTrue(all(check["status"] == "NOT_CHECKED" for check in report["checks"]))
+            store.close()
+
+    def test_email_message_subtype_is_accepted_but_genuinely_unknown_subtypes_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.bin"
+            content.write_bytes(b"email")
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes = [
+                {"source_id": 1, "parent_source_id": 999, "name": "root", "subtype": 0,
+                 "type_name": "Folder", "depth": 0, "path": "root"},
+                {"source_id": 2, "parent_source_id": 1, "name": "message.msg", "subtype": 749,
+                 "type_name": "Email Message", "depth": 1, "path": "root/message.msg"},
+            ]
+            versions = [
+                {"doc_source_id": 2, "version_num": 1, "file_name": "message.msg",
+                 "mime_type": "application/x-outlook-msg", "data_size": content.stat().st_size,
+                 "provider_id": 1, "blob_locator": str(content)},
+            ]
+            store.import_extracted_data(nodes, versions, [])
+            self.assertEqual(store.inventory_summary()["total_docs"], 1)
+            report = store.parity_report(EnvironmentConfig("dev", {}))
+            supported = next(check for check in report["checks"] if check["id"] == "SUPPORTED_OBJECT_TYPES")
+            self.assertEqual(supported["status"], "PASS")
+            store.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            content = Path(tmp) / "content.bin"
+            content.write_bytes(b"unknown")
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes = [
+                {"source_id": 1, "parent_source_id": 999, "name": "root", "subtype": 0,
+                 "type_name": "Folder", "depth": 0, "path": "root"},
+                {"source_id": 2, "parent_source_id": 1, "name": "mystery", "subtype": 999,
+                 "type_name": "Type_999", "depth": 1, "path": "root/mystery"},
+            ]
+            store.import_extracted_data(nodes, [], [])
+            report = store.parity_report(EnvironmentConfig("dev", {}))
+            supported = next(check for check in report["checks"] if check["id"] == "SUPPORTED_OBJECT_TYPES")
+            self.assertEqual(supported["status"], "FAIL")
+            self.assertIn("999", supported["detail"])
             store.close()
 
     def test_single_instance_lock_and_freeze_signature(self):

@@ -195,6 +195,20 @@ recursion, completeness and workspace target behavior require corporate TEST
 qualification. See `BUSINESS_WORKSPACE_IMPLEMENTATION_REPORT.md` for the
 verification checklist. Unknown container subtypes remain terminal errors.
 
+Source subtype 749 (Outlook `.msg` email messages, archived through the
+Archive Center `acprimary` provider) is a supported document type, handled
+identically to subtype 751 (Compound/Email): it is created on GX39 as an
+ordinary document (type 144) with its original binary, categories and
+provenance, with no subtype-specific client behavior. This classification is
+based on read-only qualification against a real production Business Workspace
+(filename suffix, `application/x-outlook-msg` MIME type and OLE Compound File
+Binary magic bytes on sampled binaries), not on OpenText subtype
+documentation, and GX39 TEST document creation/read-back for this MIME type
+still requires Pilot-level qualification before Full Cutover. Any other
+subtype not already in the supported list remains a terminal
+`SUPPORTED_OBJECT_TYPES`/`SUPPORTED_SUBTYPES` failure; it is never silently
+converted.
+
 ## Idempotency and ambiguous commits
 
 Every real target object receives an indexed GX39 text attribute named for the

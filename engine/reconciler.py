@@ -236,7 +236,7 @@ class AutomatedVerifier:
                 owner = self.manifest.owner_identity(source_owner_id)
                 versions = (
                     self.manifest.source_versions(int(row["source_id"]))
-                    if int(row["subtype"]) in (136, 144, 154, 751) else []
+                    if int(row["subtype"]) in (136, 144, 154, 749, 751) else []
                 )
                 expected_node = provenance_values(
                     {

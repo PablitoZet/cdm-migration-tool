@@ -299,3 +299,78 @@ route remain open until the checklist above passes. Multipart/large-file
 qualification, throughput tuning and the approximately 7.44 GB representative
 file are unchanged backlog items. This change adds no dependencies or Windows
 platform-specific calls, but the Windows checks must still be executed there.
+
+## Addendum: source subtype 749 support (Outlook email messages)
+
+Date: 2026-09-14 (same session). Status: **implemented and locally tested;
+GX39 TEST document creation/read-back for this MIME type not yet qualified**.
+
+During read-only qualification of the fixed W/-W traversal against the real
+production Business Workspace `763886`, `cli.py --environment production
+inspect-source` reported 275 objects of a previously unsupported source
+subtype 749 inside the migration scope (304 active instances org-wide), which
+would have made `SUPPORTED_SUBTYPES`/`SUPPORTED_OBJECT_TYPES` fail closed for
+this workspace.
+
+Read-only PostgreSQL profiling and a bounded (4 KB) read-only binary read
+through the Source Content Server REST client (`engine/source.py`,
+`ContentServerBinarySource`) established, independently, that subtype 749 is
+Outlook `.msg` email messages:
+
+- all sampled rows are direct children of ordinary folders (subtype 0), each
+  with a single primary version, provider type `acprimary` (Archive Center),
+  sizes from ~11 KB to ~26 MB;
+- filename suffix `.msg` and MIME type `application/x-outlook-msg` on every
+  sampled row (275/304 also carry category rows);
+- the first 4096 bytes of a sampled binary begin with `D0 CF 11 E0 A1 B1 1A
+  E1`, the OLE Compound File Binary Format signature used by real Outlook
+  `.msg` files, and the read size matched the expected `DVersData` size.
+
+This evidence is based on observed source data and public MIME/format
+signatures, not on OpenText subtype documentation (see AGENTS.md section 3a).
+No source-system-owner confirmation of subtype 749's business semantics or of
+any out-of-band `.msg` metadata beyond `DTree`/`DVersData`/categories has been
+obtained; this remains an open corporate-side item.
+
+Subtype 749 was added as a supported document type, handled identically to
+the existing subtype 751 (Compound/Email) pattern — no client-side special
+case is needed because `engine/client.py` `upload_first_version()` already
+creates every document subtype as GX39 type 144 regardless of source subtype.
+Changed files (all additive, same list shape as subtype 751 in each file):
+
+- `engine/db.py` — `SUBTYPE_NAMES[749] = "Email Message"`.
+- `engine/models.py` — `749` added to `DOCUMENT_TYPES`.
+- `engine/inventory.py` — `749` added to the documents-count subtype tuple.
+- `engine/manifest.py` — `749` added to the `SUPPORTED_OBJECT_TYPES` check,
+  the pilot document-candidate query, the category-documents query, the
+  `inventory_summary` `total_docs` sum, and `_phase_for_subtype` (now returns
+  `DOCUMENT`).
+- `engine/preflight.py` — `749` added to the `SUPPORTED_SUBTYPES` check.
+- `engine/reconciler.py` — `749` added to the version-provenance subtype
+  check.
+- `tests/test_engine_v2.py` — new tests
+  `test_email_message_subtype_is_named_and_counted_as_a_document`
+  (`SourceExtractionTests`) and
+  `test_email_message_subtype_is_accepted_but_genuinely_unknown_subtypes_fail_closed`
+  (`ManifestTests`); the latter also proves a genuinely unknown subtype (999)
+  still fails `SUPPORTED_OBJECT_TYPES`, so the fail-closed invariant for
+  unmapped subtypes is preserved, not weakened.
+
+Local verification after this change: `python -m unittest discover -s tests -v`
+→ 103/103 passed; `ruff check .` → clean; `mypy app.py engine tests` → success
+(informational notes only).
+
+Remaining qualification before Pilot/Full Cutover for this subtype:
+
+1. Corporate-machine confirmation with the source-system owner that subtype
+   749 objects carry no additional business data outside `DTree`,
+   `DVersData` and categories.
+2. GX39 TEST document creation and content read-back for MIME type
+   `application/x-outlook-msg`, including a representative and a
+   near-largest sampled `.msg` file, per the existing Pilot qualification
+   workflow (no new tenant configuration was identified; type 144 creation
+   is reused).
+3. `DEPLOYMENT_AND_QUALIFICATION.md` section 5a should be checked after step
+   2 in case a category/attribute exception is discovered for this content
+   type; none was required for this addition.
+

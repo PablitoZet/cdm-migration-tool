@@ -532,7 +532,7 @@ class ManifestStore:
             ).fetchone()[0])
             unsupported = conn.execute(
                 "SELECT subtype,COUNT(*) n FROM manifest_nodes "
-                f"WHERE subtype NOT IN (0,1,136,140,144,154,202,298,751,848){node_scope} "
+                f"WHERE subtype NOT IN (0,1,136,140,144,154,202,298,749,751,848){node_scope} "
                 "GROUP BY subtype", node_params
             ).fetchall()
             unmapped_categories = conn.execute(
@@ -1038,7 +1038,7 @@ class ManifestStore:
                   FROM manifest_nodes n
                   LEFT JOIN manifest_versions v ON v.doc_source_id=n.source_id
                   LEFT JOIN manifest_categories c ON c.source_id=n.source_id
-                 WHERE n.subtype IN (136,144,154,751)
+                 WHERE n.subtype IN (136,144,154,749,751)
                  GROUP BY n.source_id
                 """
             )
@@ -1068,7 +1068,7 @@ class ManifestStore:
         category_documents = conn.execute(
             """SELECT c.def_id,MIN(c.source_id) source_id FROM manifest_categories c
                JOIN manifest_nodes n ON n.source_id=c.source_id
-               WHERE n.subtype IN (136,144,154,751) GROUP BY c.def_id ORDER BY c.def_id"""
+               WHERE n.subtype IN (136,144,154,749,751) GROUP BY c.def_id ORDER BY c.def_id"""
         ).fetchall()
         for row in category_documents:
             source_id = int(row["source_id"])
@@ -1558,7 +1558,7 @@ class ManifestStore:
             row = conn.execute(
                 """SELECT COUNT(*) total_nodes,
                    COALESCE(SUM(subtype IN (0,202,298,848,899)),0) total_containers,
-                   COALESCE(SUM(subtype IN (136,144,154,751)),0) total_docs FROM manifest_nodes
+                   COALESCE(SUM(subtype IN (136,144,154,749,751)),0) total_docs FROM manifest_nodes
                    WHERE 1=1""" + node_scope,
                 node_params,
             ).fetchone()
@@ -1662,6 +1662,6 @@ def _category_value(row: dict[str, Any]) -> Any:
 def _phase_for_subtype(subtype: int) -> str:
     if subtype in (0, 202, 298, 848, 899):
         return "CONTAINER"
-    if subtype in (136, 144, 154, 751):
+    if subtype in (136, 144, 154, 749, 751):
         return "DOCUMENT"
     return "REFERENCE"

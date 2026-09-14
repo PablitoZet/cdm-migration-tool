@@ -17,8 +17,9 @@ logger = logging.getLogger("CDM.SourceDB")
 SUBTYPE_NAMES = {
     0: "Folder", 1: "Shortcut", 131: "Category", 136: "Compound Document",
     140: "URL", 144: "Document", 154: "Revision", 202: "Project",
-    298: "Collection", 751: "Compound/Email", 848: "Business Workspace",
-    849: "Business Workspace Subtype", 899: "Business Workspace Template",
+    298: "Collection", 749: "Email Message", 751: "Compound/Email",
+    848: "Business Workspace", 849: "Business Workspace Subtype",
+    899: "Business Workspace Template",
 }
 
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
