@@ -244,7 +244,17 @@ Use only:
 Priority order for this next qualification pass:
 
 1. Business Workspace type/template creation, roles and owner/provenance on
-   that route (unqualified — see section 1).
+   that route (unqualified — see section 1). **Source-side traversal for this
+   is currently blocked by a confirmed gap**: a real production Business
+   Workspace was scanned and returned a scope of 1 node with zero content,
+   because Content Server parents a Business Workspace's actual content under
+   a separate "shadow container" DataID (the negative of the workspace's own
+   DataID), not under the workspace's own DataID directly. This has been
+   delegated as a self-contained implementation task to
+   `BUSINESS_WORKSPACE_TASK_BRIEF.md` (being implemented on a machine without
+   corporate/GX39 access); once that branch is ready, pull it here, qualify
+   it against a real Business Workspace on GX39 TEST, then fold the outcome
+   into this section and delete the brief file.
 2. Multipart upload at the 49/50/51 MiB boundaries, at least one 100+ MiB file,
    and one interrupted-multipart-recovery rehearsal (unqualified).
 3. A representative large file approaching the known production maximum

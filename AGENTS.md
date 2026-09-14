@@ -326,6 +326,11 @@ style UI. Follow these rules:
 - `tests/` — engine and UI contracts.
 - `package_release.py` — secret-free checksummed transfer bundle.
 - `.github/workflows/quality.yml` — mandatory GitHub quality and release check.
+- `BUSINESS_WORKSPACE_TASK_BRIEF.md` — self-contained implementation brief for
+  the open Business Workspace source-traversal gap, written for an agent
+  without corporate/GX39 access. Delete this file once that task is
+  implemented, qualified, and folded into `ARCHITECTURE.md` and
+  `CORPORATE_HANDOFF.md`.
 
 ## 13. Required change procedure for every agent
 
