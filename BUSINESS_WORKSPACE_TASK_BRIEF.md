@@ -347,13 +347,50 @@ When you are done:
    new/changed tests and why they prove what they prove, and an explicit
    statement that this has not been tested against a real Content Server
    database or a real GX39 tenant.
-3. Hand the branch back. The next step, done together on a machine with
-   corporate/GX39 access, will be: pull the branch, point a `test`-classified
-   profile at a real Business Workspace in GX39 TEST with a configured
-   `workspace_routes` entry, run Dry Run then a Representative Pilot, and only
-   then fold the results into `CORPORATE_HANDOFF.md` and
-   `DEPLOYMENT_AND_QUALIFICATION.md` per the existing pattern used for the
-   ordinary-folder Pilot.
+3. **Also write a standalone `BUSINESS_WORKSPACE_IMPLEMENTATION_REPORT.md`**
+   at the repository root (do not only rely on the PR/commit description).
+   Verification will happen in a **fresh chat session, on a different
+   machine, with no memory of this implementation session**, so the report
+   must be fully self-contained. Include at minimum:
+   - A one-paragraph summary of what was implemented and why (link back to
+     `BUSINESS_WORKSPACE_TASK_BRIEF.md` for the original problem statement).
+   - The exact list of files changed, with a one-line reason for each.
+   - What you verified against the OpenText developer documentation, with
+     direct links and a quote/paraphrase of the relevant confirming text; and
+     separately, a clearly marked list of anything you could **not** verify
+     and implemented defensively/fail-closed instead (per section 4/5 above).
+   - The conclusion you reached on nested Business Workspaces (section 4,
+     item 4) and why.
+   - The exact commands you ran locally (`python3 -m unittest discover -s
+     tests -v`, `ruff check .`, `mypy app.py engine tests`) and their final
+     result (pass/fail counts) — copy the actual tail output, not just "all
+     passed".
+   - A precise, numbered **manual verification checklist** for the person
+     continuing in the new chat, written as concrete steps against the real
+     running app, e.g.: "1. Configure a `test` profile with
+     `source_workspace_nodeid` set to a real Business Workspace's DataID. 2.
+     Add a `workspace_routes` entry for it. 3. Run Scan source and confirm
+     `total_nodes` now reflects the full subtree, not 1. 4. Inspect the
+     manifest and confirm no node has `source_id` equal to the negative
+     shadow DataID. 5. Confirm direct former-shadow-children have
+     `parent_source_id` equal to the workspace's own positive DataID. 6. Run
+     Dry Run. 7. Run a Representative Pilot and confirm the Business
+     Workspace and its content are created and VERIFIED on GX39 TEST." Adjust
+     to whatever your actual implementation and test coverage make sensible
+     — the point is that whoever picks this up in the new thread should be
+     able to follow it step by step without re-reading your diff first.
+   - Any known limitations, edge cases deliberately not handled, or follow-up
+     work you'd recommend.
+4. Hand the branch back. The next step, done together on a machine with
+   corporate/GX39 access, will be: pull the branch, read
+   `BUSINESS_WORKSPACE_IMPLEMENTATION_REPORT.md` first, then follow its
+   manual verification checklist against a real Business Workspace in GX39
+   TEST with a configured `workspace_routes` entry (Dry Run, then a
+   Representative Pilot), and only then fold the results into
+   `CORPORATE_HANDOFF.md` and `DEPLOYMENT_AND_QUALIFICATION.md` per the
+   existing pattern used for the ordinary-folder Pilot, and delete both
+   `BUSINESS_WORKSPACE_TASK_BRIEF.md` and
+   `BUSINESS_WORKSPACE_IMPLEMENTATION_REPORT.md`.
 
 ## 10. Quick acceptance checklist
 
@@ -367,5 +404,8 @@ When you are done:
 - [ ] New unit tests added and passing; full suite, ruff, and mypy all clean.
 - [ ] `ARCHITECTURE.md` updated; in-code comment explains the mechanism.
 - [ ] `CORPORATE_HANDOFF.md`/`DEPLOYMENT_AND_QUALIFICATION.md` left untouched.
+- [ ] `BUSINESS_WORKSPACE_IMPLEMENTATION_REPORT.md` written at the repository
+      root with a self-contained summary and manual verification checklist
+      for a fresh chat session to follow.
 - [ ] PR/commit description states clearly this is unqualified pending a real
       Pilot.
