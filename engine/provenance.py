@@ -39,6 +39,7 @@ OWNER_EXCEPTION_REASONS = frozenset({
     "AMBIGUOUS",
     "CONFLICTING_IDENTIFIERS",
     "STATUS_UNKNOWN",
+    "SYSTEM_OWNER",
 })
 
 
@@ -152,6 +153,8 @@ def owner_identity_fingerprint(owner: OwnerIdentity | Mapping[str, Any]) -> str:
 
 
 def source_owner_exception_reason(owner: OwnerIdentity) -> str | None:
+    if owner.identity_status == "SYSTEM_OWNER":
+        return "SYSTEM_OWNER"
     if owner.active is False:
         return "DEACTIVATED"
     if owner.active is None or owner.identity_status in {"STATUS_UNKNOWN", "UNKNOWN"}:

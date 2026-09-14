@@ -96,7 +96,27 @@ class SourceDB:
             owner_ids = sorted({
                 int(row["owner_id"]) for row in nodes if row.get("owner_id") is not None
             })
-            owners = self._extract_owners(conn, owner_ids)
+            # Business Workspace (subtype 848) content commonly encodes an owner that is
+            # not an individual KUAF principal: qualified read-only against a real
+            # production workspace confirmed (a) the workspace node itself may carry a
+            # Content Server system/reserved OwnerID with no live KUAF row, shared across
+            # multiple workspaces, and (b) its descendants may inherit the workspace's own
+            # DataID as OwnerID (role-group-based ownership: no PermID on the workspace,
+            # auto-generated Confidential/Editors/Managers/Readers KUAF role groups scoped
+            # to the workspace instead). Recognize only these two deterministic,
+            # source-verified patterns as SYSTEM_OWNER so the offline readiness gate can
+            # route them through the existing approved-fallback mechanism instead of a
+            # silent conversion; every other unmatched OwnerID remains UNKNOWN and still
+            # fails closed.
+            workspace_dataids = {
+                int(row["source_id"]) for row in nodes if row.get("subtype") == 848
+            }
+            workspace_owner_ids = {
+                int(row["owner_id"]) for row in nodes
+                if row.get("subtype") == 848 and row.get("owner_id") is not None
+            }
+            system_owner_ids = frozenset(workspace_dataids | workspace_owner_ids)
+            owners = self._extract_owners(conn, owner_ids, system_owner_ids)
         return {
             "nodes": nodes, "versions": versions, "categories": categories, "owners": owners,
             "snapshot": snapshot_id, "extracted_at": datetime.now(UTC).isoformat(),
@@ -320,7 +340,9 @@ class SourceDB:
             cur.execute(query, (node_ids,))
             return [dict(row) for row in cur.fetchall()]
 
-    def _extract_owners(self, conn, owner_ids: list[int]) -> list[dict[str, Any]]:
+    def _extract_owners(
+        self, conn, owner_ids: list[int], system_owner_ids: frozenset[int] = frozenset(),
+    ) -> list[dict[str, Any]]:
         """Read each referenced KUAF identity once without assuming its schema."""
         if not owner_ids:
             return []
@@ -393,7 +415,12 @@ class SourceDB:
         for owner_id in owner_ids:
             matches = rows_by_kuaf_id.get(self._kuaf_lookup_id(owner_id), [])
             if not matches:
-               continue
+                if owner_id in system_owner_ids:
+                    result[owner_id].update({
+                        "identity_status": "SYSTEM_OWNER",
+                        "status_source": "business_workspace_system_owner",
+                    })
+                continue
             if len(matches) > 1:
                result[owner_id].update({
                    "identity_status": "AMBIGUOUS",

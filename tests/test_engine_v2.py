@@ -545,7 +545,7 @@ class SourceExtractionTests(unittest.TestCase):
             extracted = source.extract_all(100)
         versions.assert_called_once_with(connection, [100, 101, 102, 103, 104])
         categories.assert_called_once_with(connection, [100, 101, 102, 103, 104])
-        owners.assert_called_once_with(connection, [-42])
+        owners.assert_called_once_with(connection, [-42], frozenset({100, -42}))
         self.assertEqual(len(extracted["nodes"]), 5)
         self.assertTrue(extracted["source_signature"])
 
@@ -617,6 +617,38 @@ class SourceExtractionTests(unittest.TestCase):
         self.assertTrue(owners[0]["active"])
         self.assertEqual(owners[0]["identity_status"], "KNOWN")
         self.assertIn("CONCAT_WS", connection.owner_query)
+
+    def test_business_workspace_system_owner_ids_are_classified_not_unknown(self):
+        # No KUAF rows at all: mirrors the qualified production evidence where a
+        # Business Workspace's own reserved OwnerID (e.g. -2000) and its
+        # descendants' owner_id (the workspace's own positive DataID) have no
+        # live KUAF row, because ownership is governed by auto-generated
+        # role groups instead of an individual KUAF principal.
+        connection = _OwnerConnection([])
+
+        owners = _OwnerTestSourceDB({})._extract_owners(
+            connection, [-2000, 100], frozenset({100, -2000}),
+        )
+
+        by_id = {row["source_owner_id"]: row for row in owners}
+        self.assertEqual(by_id[-2000]["identity_status"], "SYSTEM_OWNER")
+        self.assertEqual(by_id[-2000]["status_source"], "business_workspace_system_owner")
+        self.assertEqual(by_id[100]["identity_status"], "SYSTEM_OWNER")
+
+    def test_unrelated_unmatched_owner_id_still_fails_closed_as_unknown(self):
+        # An owner_id that does not match any in-scope workspace DataID or its
+        # own recorded OwnerID must remain UNKNOWN even with no KUAF match, so
+        # a genuinely orphaned/corrupted reference is never silently accepted.
+        connection = _OwnerConnection([])
+
+        owners = _OwnerTestSourceDB({})._extract_owners(
+            connection, [-999999], frozenset({100, -2000}),
+        )
+
+        self.assertEqual(owners[0]["source_owner_id"], -999999)
+        self.assertEqual(owners[0]["identity_status"], "UNKNOWN")
+        self.assertIsNone(owners[0]["status_source"])
+
 
     def test_primary_versions_join_provider_data_and_exclude_renditions(self):
         connection = _VersionConnection([_version_row()])

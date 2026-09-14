@@ -374,3 +374,89 @@ Remaining qualification before Pilot/Full Cutover for this subtype:
    2 in case a category/attribute exception is discovered for this content
    type; none was required for this addition.
 
+## Addendum: Business Workspace ownership without an individual KUAF principal
+
+Real read-only qualification against the actual production Business Workspace
+selected for migration (source DataID `763886`, GX39 target parent `763886`
+route configured for mechanism testing only, using a non-representative TEST
+workspace type/template) surfaced a distinct gap from subtype 749: the
+offline `OWNER_IDENTITY_COVERAGE` preflight check failed for essentially every
+node in the extracted tree, blocking even Dry Run.
+
+Investigation (read-only, via `SourceDB.snapshot()` against the source
+PostgreSQL, never against DTree/KUAF with write intent):
+
+- The workspace node itself (`763886`) has `DTree.OwnerID = -2000`. KUAF has
+  no row with `id=2000`, so the classic `-OwnerID -> KUAF.id` convention used
+  for ordinary folders/documents does not resolve.
+- Extending the check to all 4 Business Workspaces present in the entire
+  source database: all 4 show only 2 distinct `OwnerID` sentinel values
+  (`-2000` for 3 of them, `-2429` for 1), confirming this is a shared,
+  system-level Content Server convention, not something specific to this one
+  workspace.
+- Nearly all descendants of the inspected workspace (29,225 of 29,226 nodes)
+  have `owner_id = 763886` — the workspace's own positive DataID, again not a
+  real KUAF identity.
+- The workspace's `PermID` is `NULL` (classic ACL unused for subtype 848).
+  KUAF contains 4 auto-generated role groups scoped to this workspace via
+  `KUAF.type = 763886`: "Confidential", "Editors", "Managers", "Readers", all
+  self-referencing `leaderid` (no individual user recorded there either).
+- The exact mechanism behind the Content Server UI's "Owned By: Admin"
+  display for this workspace was not fully explained by `DTree`/`KUAF` data
+  alone; it is very likely resolved through a Business Workspace-specific
+  API/metadata layer not covered by this read-only database investigation.
+  This remains an open, low-priority item — see below for why it does not
+  block the tool.
+
+Per `ARCHITECTURE.md`, migrated-object access/permissions are always
+inherited from the approved GX39 destination ACL, never from `Owned By`.
+`Owned By` is therefore a provenance/reporting attribute with no functional
+access-control impact — but `OWNER_IDENTITY_COVERAGE` is an offline,
+fail-closed gate that blocked Dry Run/Pilot readiness regardless, so a
+usability fix (not a permissions fix) was implemented:
+
+- `engine/db.py::extract_all`/`_extract_owners` now classify an owner_id as
+  `identity_status="SYSTEM_OWNER"` only when it exactly matches an in-scope
+  subtype-848 node's own DataID or that same node's own recorded `OwnerID`,
+  and only when zero KUAF rows match. Every other unmatched owner_id remains
+  `UNKNOWN`, preserving the fail-closed guarantee for genuinely orphaned or
+  corrupted owner references anywhere else in the tree.
+- `OWNER_IDENTITY_COVERAGE` (`engine/preflight.py`) and its twin
+  `OWNER_IDENTITY_PARITY` (`engine/manifest.py::parity_report`) now exempt
+  `SYSTEM_OWNER` from their incompleteness check.
+- `engine/provenance.py::source_owner_exception_reason` now reports
+  `"SYSTEM_OWNER"` distinctly (instead of the generic `"STATUS_UNKNOWN"`), so
+  an operator approving a run-scoped fallback can see precisely why these
+  owners require it.
+- No change was needed in the fallback/approval machinery itself
+  (`engine/pipeline.py::owner_readiness`/`_resolve_run_identities`,
+  `engine/provenance.py::resolve_fallback_principal`/`fallback_resolve`):
+  `SYSTEM_OWNER` owners still have `active=None`, so they still require an
+  explicit operator-approved fallback mapping (or a manual OwnerID-to-Login
+  mapping) before `Owned By` is actually assigned in a real Pilot/Full run.
+  This fix only unblocks the offline readiness gate; it does not decide what
+  `Owned By` ends up being for these nodes, and does not weaken the approval
+  requirement in any way.
+
+New regression tests (`tests/test_engine_v2.py`):
+`test_business_workspace_system_owner_ids_are_classified_not_unknown` proves
+the new classification fires only for the narrow in-scope pattern, and
+`test_unrelated_unmatched_owner_id_still_fails_closed_as_unknown` proves an
+unrelated owner_id with no KUAF match still fails closed as `UNKNOWN`. The
+pre-existing `test_extract_all_never_requests_shadow_metadata` assertion was
+updated for the new `_extract_owners` parameter.
+
+Local verification after this change against real production data (workspace
+`763886`, ~29.2k nodes): `cli.py --environment production preflight` moved
+`OWNER_IDENTITY_COVERAGE` from `FAIL` to `PASS` with no change to any other
+check's status. `python -m unittest discover -s tests -v` → 105/105 passed;
+`ruff check .` → clean; `mypy app.py engine tests` → success (informational
+notes only).
+
+Remaining qualification before Pilot/Full Cutover: an approved
+`owner_fallback` mapping (or explicit manual OwnerID-to-Login mappings) is
+still required at Pilot/Full time for every `SYSTEM_OWNER` (and any other
+non-`KNOWN`) owner before a real run assigns `Owned By`; this addendum only
+removes an offline-gate blocker for reaching that stage during testing.
+
+

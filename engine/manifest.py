@@ -640,7 +640,7 @@ class ManifestStore:
         missing_owner_rows = sorted(owner_ids - set(manifest_owners))
         incomplete_owner_rows = sorted(
             source_id for source_id, owner in manifest_owners.items()
-            if source_id in owner_ids and (
+            if source_id in owner_ids and owner.identity_status != "SYSTEM_OWNER" and (
                 owner.identity_status in {"UNKNOWN", "STATUS_UNKNOWN", "AMBIGUOUS", "UNRESOLVED"}
                 or owner.active is None
             )

@@ -209,6 +209,40 @@ subtype not already in the supported list remains a terminal
 `SUPPORTED_OBJECT_TYPES`/`SUPPORTED_SUBTYPES` failure; it is never silently
 converted.
 
+Business Workspace content ownership does not always resolve through the
+classic `DTree.OwnerID -> KUAF.id` convention used for ordinary
+folders/documents. Read-only qualification against a real production
+Business Workspace (all 4 Business Workspaces present in the source database)
+confirmed two deterministic patterns with no live KUAF row: (a) the workspace
+node itself may carry a Content Server system/reserved `OwnerID` (for example
+`-2000`, shared across multiple unrelated workspaces) instead of an
+individual owner, and (b) its descendants commonly inherit the workspace's own
+positive DataID as `owner_id`. In both cases the workspace's `PermID` is
+`NULL` and Content Server auto-generates role-group KUAF rows scoped to the
+workspace (Confidential/Editors/Managers/Readers) instead of using classic
+per-user ownership. `engine/db.py::extract_all`/`_extract_owners` recognize
+only these two narrow, source-verified cases (an owner_id exactly equal to an
+in-scope subtype-848 node's own DataID, or exactly equal to that same node's
+own recorded `OwnerID`) and classify them as `identity_status="SYSTEM_OWNER"`,
+distinct from `UNKNOWN`. `OWNER_IDENTITY_COVERAGE` (`engine/preflight.py`) and
+`OWNER_IDENTITY_PARITY` (`engine/manifest.py::parity_report`) exempt
+`SYSTEM_OWNER` from their fail-closed incompleteness check, so a Business
+Workspace tree no longer blocks Dry Run/Pilot readiness on this pattern alone.
+Every other owner_id with no KUAF match is still classified `UNKNOWN` and
+still fails closed - this does not weaken the guard against a genuinely
+orphaned or corrupted owner reference elsewhere in the tree. `SYSTEM_OWNER`
+owners still have `active=None`, so they still route through the existing
+exception/fallback resolution path
+(`engine/provenance.py::source_owner_exception_reason`,
+`engine/pipeline.py::owner_readiness`/`_resolve_run_identities`) and still
+require an explicit operator-approved fallback mapping (or a manual
+OwnerID-to-Login mapping) before a real Pilot/Full run assigns `Owned By` for
+these nodes; nothing here bypasses that approval. This has no effect on the
+migrated object's actual access/permissions, which are always inherited from
+the approved GX39 destination ACL, not from `Owned By` (see the policy list
+above); the fix only unblocks the offline readiness gate, it does not change
+what `Owned By` ends up being for these nodes.
+
 ## Idempotency and ambiguous commits
 
 Every real target object receives an indexed GX39 text attribute named for the
