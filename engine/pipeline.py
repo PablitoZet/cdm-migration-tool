@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from typing import Any, BinaryIO
 
+from .audit_export import audit_history_csv
 from .client import OpenTextCloudClient
 from .config import EnvironmentConfig
 from .db import SourceDB
@@ -196,6 +197,44 @@ class MigrationPipeline:
             "system_attribute_capabilities": self.target.system_attribute_capabilities(target),
         }
 
+    def export_audit_history(
+        self, *, upload_parent_id: int | None = None, max_documents: int | None = None,
+    ) -> dict[str, Any]:
+        """Optional, read-only export of the source audit trail for the current
+        manifest scope, rendered as a CSV document. This never touches GX39's own
+        audit trail; see `engine/audit_export.py` for why that is not attempted.
+
+        When `upload_parent_id` is given, the CSV is uploaded as a single
+        supplementary document into that (already-migrated) target container,
+        using the same duplicate-protection marker as ordinary migrated objects
+        so re-running this export does not create a second copy. Without
+        `upload_parent_id`, only the CSV bytes and row count are returned so the
+        operator can inspect it locally first.
+        """
+        scope_ids = self.manifest.source_ids_for_scope(max_documents) or set()
+        rows = self.source_db.export_audit_history(sorted(scope_ids))
+        csv_bytes = audit_history_csv(rows)
+        root = int(self.env_cfg.get("source_workspace_nodeid"))
+        result: dict[str, Any] = {
+            "status": "exported", "source_root_id": root,
+            "row_count": len(rows), "csv_bytes": len(csv_bytes), "content": csv_bytes,
+        }
+        if upload_parent_id is not None:
+            namespace = str(self.env_cfg.get("migration_namespace", self.env_name)).strip()
+            migration_id = f"CDM:{namespace}:audit-export:{root}"
+            name = f"Source_Audit_History_{root}.csv"
+            description = (
+                f"Read-only export of the source Content Server audit trail for "
+                f"workspace {root} ({len(rows)} rows). Not GX39's own audit log; "
+                f"see historical_audit_out_of_scope_approved."
+            )
+            target_id = self.target.upload_supplementary_document(
+                int(upload_parent_id), name, description, csv_bytes, "text/csv", migration_id,
+            )
+            result["status"] = "uploaded"
+            result["target_id"] = target_id
+        return result
+
     def confirm_source_freeze(self, operator: str, note: str = "") -> dict[str, Any]:
         root = int(self.env_cfg.get("source_workspace_nodeid"))
         observed = self.source_db.scope_signature(root)
@@ -213,6 +252,7 @@ class MigrationPipeline:
             if not 1 <= worker_count <= maximum:
                 raise ValueError(f"threads must be between 1 and {maximum}")
             run_mode = RunMode(mode or (RunMode.DRY_RUN if dry_run else RunMode.PILOT if max_items else RunMode.FULL))
+            core_pilot = run_mode == RunMode.CORE_PILOT
             if run_mode == RunMode.FULL and self.is_production:
                 freeze = self.manifest.freeze_status()
                 if not freeze["confirmed"]:
@@ -224,7 +264,7 @@ class MigrationPipeline:
             service_identity: dict[str, Any] | None = None
             if run_mode != RunMode.DRY_RUN and self._owner_contract_available():
                 owner_resolutions, fallback_approval, service_identity = self._resolve_run_identities(
-                    owner_exception_approval, max_items
+                    owner_exception_approval, max_items, core_pilot=core_pilot
                 )
             if run_mode == RunMode.DRY_RUN or self.env_cfg.get("ot_cloud_url"):
                 from .preflight import PreflightAuditor
@@ -240,6 +280,7 @@ class MigrationPipeline:
                     online=run_mode != RunMode.DRY_RUN,
                     for_mode=str(run_mode),
                     max_documents=max_items,
+                    core_pilot=core_pilot,
                     owner_resolutions=owner_resolutions,
                     fallback_approval=fallback_approval,
                     service_identity=service_identity,
@@ -252,6 +293,7 @@ class MigrationPipeline:
             run_id = self.manifest.create_run(
                 self.env_name, run_mode, root,
                 max_documents=max_items,
+                core_pilot=core_pilot,
                 config_fingerprint=self._config_fingerprint(),
                 source_snapshot=metadata.get("inventory_snapshot"),
                 metadata_contract_version=(
@@ -288,14 +330,17 @@ class MigrationPipeline:
             )
         )
 
-    def _manifest_owner_ids(self, max_documents: int | None = None) -> list[int]:
-        return sorted(self.manifest.owner_ids_for_scope(max_documents))
+    def _manifest_owner_ids(
+        self, max_documents: int | None = None, *, core_pilot: bool = False,
+    ) -> list[int]:
+        return sorted(self.manifest.owner_ids_for_scope(max_documents, core_pilot=core_pilot))
 
     def owner_readiness(
         self, *, online: bool = True, max_documents: int | None = None,
+        core_pilot: bool = False,
     ) -> dict[str, Any]:
         """Return GET-only owner resolution evidence for the operator UI."""
-        owner_ids = self._manifest_owner_ids(max_documents)
+        owner_ids = self._manifest_owner_ids(max_documents, core_pilot=core_pilot)
         owners = {owner.source_owner_id: owner for owner in self.manifest.owner_identities()}
         missing = sorted(set(owner_ids) - set(owners))
         result: dict[str, Any] = {
@@ -351,7 +396,19 @@ class MigrationPipeline:
             or self.env_cfg.get("ot_cloud_user")
             or getattr(target, "username", "")
         ).strip()
+        service_email = str(self.env_cfg.get("service_account_email") or "").strip()
         service_member = resolve_target_login(service_login, lookup) if service_login else None
+        service_member_id = self.env_cfg.get("service_account_member_id")
+        if service_member is None and service_member_id is not None:
+            service_member = self._resolve_fallback_member(
+                {
+                    "member_id": service_member_id,
+                    "login": service_login,
+                    "email": service_email,
+                },
+                lookup,
+                target,
+            )
         result["exceptions"] = [
             {
                 "source_owner_id": resolution.source_owner_id,
@@ -372,7 +429,7 @@ class MigrationPipeline:
             )
             if fallback_config:
                 try:
-                    fallback = resolve_fallback_principal(fallback_config, lookup)
+                    fallback = self._resolve_fallback_member(fallback_config, lookup, target)
                 except TerminalMigrationError as exc:
                     result["fallback_error"] = str(exc)
                 else:
@@ -412,9 +469,10 @@ class MigrationPipeline:
 
     def _resolve_run_identities(
         self, approval: dict[str, Any] | None, max_documents: int | None = None,
+        *, core_pilot: bool = False,
     ) -> tuple[list[OwnerResolution], dict[str, Any] | None, dict[str, Any]]:
         owners = self.manifest.owner_identities()
-        owner_ids = self.manifest.owner_ids_for_scope(max_documents)
+        owner_ids = self.manifest.owner_ids_for_scope(max_documents, core_pilot=core_pilot)
         by_id = {owner.source_owner_id: owner for owner in owners}
         missing = sorted(owner_ids - set(by_id))
         if missing:
@@ -437,7 +495,19 @@ class MigrationPipeline:
             or self.env_cfg.get("ot_cloud_user")
             or getattr(target, "username", "")
         ).strip()
+        service_email = str(self.env_cfg.get("service_account_email") or "").strip()
         service_member = resolve_target_login(service_login, lookup) if service_login else None
+        service_member_id = self.env_cfg.get("service_account_member_id")
+        if service_member is None and service_member_id is not None:
+            service_member = self._resolve_fallback_member(
+                {
+                    "member_id": service_member_id,
+                    "login": service_login,
+                    "email": service_email,
+                },
+                lookup,
+                target,
+            )
         fallback_approval: dict[str, Any] | None = None
         if exceptions:
             fallback_config = (
@@ -453,7 +523,9 @@ class MigrationPipeline:
                     "OWNER_FALLBACK_CONFIGURATION: unresolved or deactivated source owners require "
                     "an explicitly configured active fallback"
                 )
-            fallback_member = resolve_fallback_principal(fallback_config, lookup)
+            fallback_member = self._resolve_fallback_member(
+                fallback_config, lookup, target,
+            )
             resolutions = [
                 fallback_resolve(
                     by_id[resolution.source_owner_id],
@@ -492,7 +564,6 @@ class MigrationPipeline:
                 "operator": operator,
                 "change_record": change_record,
             }
-        service_email = str(self.env_cfg.get("service_account_email") or "").strip()
         if not service_login and not service_email:
             raise TerminalMigrationError(
                 "SERVICE_ACCOUNT_IDENTITY: configured GX39 migration account is missing"
@@ -509,6 +580,37 @@ class MigrationPipeline:
             "active": service_member.get("active"),
         }
         return resolutions, fallback_approval, service_identity
+
+    @staticmethod
+    def _resolve_fallback_member(
+        fallback_config: dict[str, Any], lookup: Any, target: Any,
+    ) -> dict[str, Any]:
+        """Validate a configured fallback with a direct member read when possible.
+
+        Some GX39 tenants restrict member-list searches even for the migration
+        service account. A direct GET by the explicitly configured tenant-local
+        member ID is still read-only evidence, and is checked against the
+        configured exact login or e-mail before it can be used.
+        """
+        member_id = fallback_config.get("member_id")
+        get_member = getattr(target, "get_member", None)
+        if member_id is not None and callable(get_member):
+            candidate = member_identity(get_member(int(member_id)))
+            configured_login = normalized_identity(fallback_config.get("login"))
+            configured_email = normalized_identity(fallback_config.get("email"))
+            if (
+                candidate.get("id") == int(member_id)
+                and candidate.get("active") is True
+                and (
+                    configured_login and normalized_identity(candidate.get("login")) == configured_login
+                    or configured_email and normalized_identity(candidate.get("email")) == configured_email
+                )
+            ):
+                return candidate
+            raise TerminalMigrationError(
+                "Fallback principal direct read-back does not match its configured active identity"
+            )
+        return resolve_fallback_principal(fallback_config, lookup)
 
     def pause(self) -> None:
         with self._control_lock:
@@ -556,11 +658,19 @@ class MigrationPipeline:
                     if isinstance(self.env_cfg, EnvironmentConfig)
                     else EnvironmentConfig(self.env_name, self.env_cfg)
                 )
+                with self.manifest.connection() as conn:
+                    doc_count = conn.execute(
+                        "SELECT COUNT(1) FROM run_items r JOIN manifest_nodes n ON n.source_id=r.source_id "
+                        "WHERE r.run_id=? AND n.subtype=144",
+                        (run_id,),
+                    ).fetchone()[0]
                 report = PreflightAuditor(
                     preflight_env, self.manifest, self.settings
                 ).run(
                     online=True,
                     for_mode=str(run_mode),
+                    core_pilot=(run_mode == RunMode.CORE_PILOT),
+                    max_documents=doc_count or None,
                     owner_resolutions=stored_resolutions,
                     fallback_approval=stored_approval,
                     service_identity=stored_service,
@@ -811,6 +921,10 @@ class MigrationPipeline:
             return
         target_root = int(self.env_cfg.get("target_workspace_nodeid"))
         parent = self.manifest.resolve_parent(node.parent_source_id, target_root)
+        workspace_routes = self.env_cfg.get("workspace_routes", {}) or {}
+        route = workspace_routes.get(str(node.source_id)) or workspace_routes.get(node.type_name) or {}
+        loc_id = route.get("location_id")
+        expected_parent = int(loc_id) if (node.subtype == 848 and loc_id) else parent
         migration_id = self._migration_id(node.source_id)
         if node.depth == 0 and bool(self.env_cfg.get("source_root_maps_to_target", False)):
             properties = self.target.get_node(target_root)
@@ -826,19 +940,19 @@ class MigrationPipeline:
         try:
             target_id = self.target.create_container(node, parent, migration_id)
         except AmbiguousRemoteCommit:
-            target_id = self.target.find_by_migration_id(parent, migration_id)
+            target_id = self.target.find_by_migration_id(expected_parent, migration_id, expected_name=node.name)
             if not target_id:
                 raise
-        self.manifest.commit_mapping(run_id, node.source_id, target_id, parent, migration_id, worker_id=worker_id)
+        self.manifest.commit_mapping(run_id, node.source_id, target_id, expected_parent, migration_id, worker_id=worker_id)
         categories = self.manifest.categories(node.source_id)
         if categories:
             self.target.apply_categories(target_id, categories)
         self._apply_node_policies(run_id, target_id, node)
         self._verify_metadata(run_id, target_id, node)
         properties = self.target.get_node(target_id)
-        if int(properties.get("parent_id", -1)) != parent or properties.get("name") != node.name:
+        if int(properties.get("parent_id", -1)) != expected_parent or properties.get("name") != node.name:
             raise TerminalMigrationError(f"Container read-after-write mismatch for {node.source_id}")
-        self._finish_item(run_id, node.source_id, worker_id=worker_id)
+        self._finish_item(run_id, node.source_id, worker_id=worker_id, target_id=target_id)
 
     def _process_document(self, run_id: str, worker_id: str, item: dict[str, Any], mode: RunMode) -> None:
         node = self.manifest.source_node(item["source_id"])
@@ -854,7 +968,7 @@ class MigrationPipeline:
         parent = self.manifest.resolve_parent(node.parent_source_id, int(self.env_cfg.get("target_workspace_nodeid")))
         migration_id = self._migration_id(node.source_id)
         mapping = self.manifest.lookup_mapping(node.source_id)
-        marker_target = self.target.find_by_migration_id(parent, migration_id)
+        marker_target = self.target.find_by_migration_id(parent, migration_id, expected_name=node.name)
         if mapping and marker_target and int(mapping["target_id"]) != marker_target:
             raise TerminalMigrationError("Durable mapping conflicts with the migration marker")
         target_id = marker_target or (int(mapping["target_id"]) if mapping else None)
@@ -893,7 +1007,7 @@ class MigrationPipeline:
                         try:
                             result = self.target.upload_first_version(node, version, parent, hashing, migration_id)
                         except AmbiguousRemoteCommit:
-                            recovered = self.target.find_by_migration_id(parent, migration_id)
+                            recovered = self.target.find_by_migration_id(parent, migration_id, expected_name=node.name)
                             if not recovered:
                                 raise
                             from .models import UploadResult
@@ -1239,7 +1353,7 @@ class MigrationPipeline:
                 node, parent, migration_id, referenced_target_id=referenced_target
             )
         except AmbiguousRemoteCommit:
-            target_id = self.target.find_by_migration_id(parent, migration_id)
+            target_id = self.target.find_by_migration_id(parent, migration_id, expected_name=node.name)
             if not target_id:
                 raise
         self.manifest.commit_mapping(run_id, node.source_id, target_id, parent, migration_id, worker_id=worker_id)

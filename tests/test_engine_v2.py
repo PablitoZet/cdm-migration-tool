@@ -10,6 +10,8 @@ from contextlib import closing, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
+from cli import _owner_exception_approval
+from engine.audit_export import audit_history_csv
 from engine.client import MultipartStream, OpenTextCloudClient, _extract_member_rows, _TokenManager
 from engine.config import (
     ConfigurationError,
@@ -69,7 +71,7 @@ class FakeTarget:
         self.markers[(parent_id, migration_id)] = self.next_id
         return self.next_id
 
-    def find_by_migration_id(self, parent_id, migration_id):
+    def find_by_migration_id(self, parent_id, migration_id, *, expected_name=None):
         return self.markers.get((parent_id, migration_id))
 
     def apply_migration_marker(self, target_id, migration_id):
@@ -121,6 +123,18 @@ class FakeTarget:
         self.nodes[self.next_id] = {
             "id": self.next_id, "name": node.name, "parent_id": parent_id, "type": node.subtype,
         }
+        return self.next_id
+
+    def upload_supplementary_document(self, parent_id, name, description, content, mime_type, migration_id):
+        existing = self.markers.get((parent_id, migration_id))
+        if existing:
+            return existing
+        self.next_id += 1
+        self.nodes[self.next_id] = {
+            "id": self.next_id, "name": name, "parent_id": parent_id, "type": 144,
+        }
+        self.contents[(self.next_id, 1)] = content
+        self.markers[(parent_id, migration_id)] = self.next_id
         return self.next_id
 
 
@@ -548,6 +562,36 @@ class SourceExtractionTests(unittest.TestCase):
         owners.assert_called_once_with(connection, [-42], frozenset({100, -42}))
         self.assertEqual(len(extracted["nodes"]), 5)
         self.assertTrue(extracted["source_signature"])
+
+    def test_extract_all_remaps_workspace_system_owners_to_created_by(self):
+        source = _TestSourceDB({})
+        rows = [
+            {**_node_row(-100, -1, 849, 0, "Workspace"), "name": "Hidden container"},
+            {**_node_row(100, 9, 848, 0, "Workspace"), "owner_id": -2000, "created_by": 766161},
+            {**_node_row(101, -100, 0, 1, "Workspace/Folder"), "owner_id": 100, "created_by": 800912},
+            {**_node_row(102, -100, 144, 1, "Workspace/Direct.txt"), "owner_id": 100, "created_by": 775190},
+            {**_node_row(103, 101, 0, 2, "Workspace/Folder/Inner"), "owner_id": 100, "created_by": None},
+        ]
+        connection = _VersionConnection(rows)
+        with (
+            patch.object(source, "snapshot", return_value=nullcontext((connection, "test-snapshot"))),
+            patch.object(source, "_extract_versions", return_value=[]),
+            patch.object(source, "_extract_categories", return_value=[]),
+            patch.object(source, "_extract_owners", return_value=[]) as owners,
+        ):
+            extracted = source.extract_all(100)
+
+        by_id = {row["source_id"]: row for row in extracted["nodes"]}
+        self.assertEqual(by_id[100]["owner_id"], 766161)
+        self.assertEqual(by_id[101]["owner_id"], 800912)
+        self.assertEqual(by_id[102]["owner_id"], 775190)
+        # Node 103 had no created_by, so its owner_id remains the system owner (100)
+        self.assertEqual(by_id[103]["owner_id"], 100)
+        owners.assert_called_once_with(
+            connection,
+            [100, 766161, 775190, 800912],
+            frozenset({100, -2000}),
+        )
 
     def test_workspace_manifest_pilot_keeps_real_ancestors_and_parent_dependencies(self):
         original = [row for row in _workspace_rows() if row["source_id"] != 102]
@@ -1082,6 +1126,48 @@ class ManifestTests(unittest.TestCase):
             ]
             store.import_extracted_data(nodes, versions, [])
             run_id = store.create_run("dev", RunMode.PILOT, 9000, max_documents=1)
+            self.assertEqual(store.run_summary(run_id)["total_nodes"], 3)
+            store.close()
+
+    def test_core_pilot_excludes_shortcuts_and_non_core_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ManifestStore(str(Path(tmp) / "state.db"))
+            nodes = [
+                {"source_id": 1, "parent_source_id": 999, "name": "root", "subtype": 848,
+                 "type_name": "Business Workspace", "depth": 0, "path": "root"},
+                {"source_id": 2, "parent_source_id": 1, "name": "folder", "subtype": 0,
+                 "type_name": "Folder", "depth": 1, "path": "root/folder"},
+                {"source_id": 3, "parent_source_id": 2, "name": "eligible", "subtype": 144,
+                 "type_name": "Document", "depth": 2, "path": "root/folder/eligible"},
+                {"source_id": 4, "parent_source_id": 2, "name": "large", "subtype": 144,
+                 "type_name": "Document", "depth": 2, "path": "root/folder/large"},
+                {"source_id": 5, "parent_source_id": 2, "name": "commented", "subtype": 144,
+                 "type_name": "Document", "depth": 2, "path": "root/folder/commented"},
+                {"source_id": 6, "parent_source_id": 2, "name": "categorized", "subtype": 144,
+                 "type_name": "Document", "depth": 2, "path": "root/folder/categorized"},
+                {"source_id": 7, "parent_source_id": 1, "name": "shortcut", "subtype": 1,
+                 "type_name": "Shortcut", "depth": 1, "path": "root/shortcut"},
+            ]
+            versions = [
+                {"doc_source_id": 3, "version_num": 1, "file_name": "eligible",
+                 "mime_type": "x", "data_size": 1},
+                {"doc_source_id": 4, "version_num": 1, "file_name": "large",
+                 "mime_type": "x", "data_size": 52428800},
+                {"doc_source_id": 5, "version_num": 1, "file_name": "commented",
+                 "mime_type": "x", "data_size": 1, "source_comment": "comment"},
+                {"doc_source_id": 6, "version_num": 1, "file_name": "categorized",
+                 "mime_type": "x", "data_size": 1},
+            ]
+            categories = [{
+                "source_id": 6, "def_id": 762577, "attr_key": "2",
+                "value_json": json.dumps("RELEASED"),
+            }]
+            store.import_extracted_data(nodes, versions, categories)
+
+            self.assertEqual(store.source_ids_for_scope(1, core_pilot=True), {1, 2, 3})
+            run_id = store.create_run(
+                "dev", RunMode.CORE_PILOT, 9000, max_documents=1, core_pilot=True,
+            )
             self.assertEqual(store.run_summary(run_id)["total_nodes"], 3)
             store.close()
 
@@ -1795,6 +1881,103 @@ class PipelineTests(unittest.TestCase):
                 document_nodes = [node for node in target.nodes.values() if node["name"] == "document.txt"]
                 self.assertEqual(len(document_nodes), 1)
 
+    def test_export_audit_history_writes_csv_and_uploads_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = FakeTarget()
+            config = _config()
+            config["environments"]["dev"]["source_workspace_nodeid"] = 1
+
+            class FakeSourceDB:
+                def __init__(self):
+                    self.requested_scope_ids: list[int] | None = None
+
+                def export_audit_history(self, scope_ids):
+                    self.requested_scope_ids = list(scope_ids)
+                    return [{
+                        "event_id": 1, "audit_date": "2026-01-01T00:00:00", "data_id": 1,
+                        "subtype": 144, "action": "Update", "user_id": 1000, "user_name": "alice",
+                        "performer_id": 1000, "performer_name": "alice",
+                        "value_key": "1", "value1": "old", "value2": "new",
+                    }]
+
+            fake_source = FakeSourceDB()
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=target, binary_source=LocalBinarySource(), source_db=fake_source,
+            )) as pipeline:
+                pipeline.manifest.import_extracted_data([{
+                    "source_id": 1, "parent_source_id": None, "name": "root",
+                    "subtype": 0, "type_name": "Folder", "depth": 0, "path": "root",
+                }], [], [])
+
+                first = pipeline.export_audit_history(upload_parent_id=9000)
+                self.assertEqual(first["status"], "uploaded")
+                self.assertEqual(first["row_count"], 1)
+                self.assertEqual(fake_source.requested_scope_ids, [1])
+                csv_text = first["content"].decode("utf-8")
+                self.assertIn("event_id", csv_text.splitlines()[0])
+                self.assertIn("alice", csv_text)
+                target_id = first["target_id"]
+
+                second = pipeline.export_audit_history(upload_parent_id=9000)
+                self.assertEqual(second["target_id"], target_id)
+                self.assertEqual(
+                    len([n for n in target.nodes.values() if n["name"].startswith("Source_Audit_History_")]), 1,
+                )
+
+    def test_export_audit_history_without_upload_is_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = FakeTarget()
+            config = _config()
+            config["environments"]["dev"]["source_workspace_nodeid"] = 1
+
+            class FakeSourceDB:
+                def export_audit_history(self, scope_ids):
+                    return []
+
+            with closing(MigrationPipeline(
+                config, str(Path(tmp) / "state.db"),
+                target=target, binary_source=LocalBinarySource(), source_db=FakeSourceDB(),
+            )) as pipeline:
+                pipeline.manifest.import_extracted_data([{
+                    "source_id": 1, "parent_source_id": None, "name": "root",
+                    "subtype": 0, "type_name": "Folder", "depth": 0, "path": "root",
+                }], [], [])
+                result = pipeline.export_audit_history()
+                self.assertEqual(result["status"], "exported")
+                self.assertEqual(result["row_count"], 0)
+                self.assertNotIn("target_id", result)
+                self.assertEqual(len(target.nodes), 1)  # only the pre-seeded target root
+
+
+class AuditExportTests(unittest.TestCase):
+    def test_audit_history_csv_renders_header_and_rows_in_order(self):
+        rows = [
+            {
+                "event_id": 2, "audit_date": "2026-01-02T00:00:00", "data_id": 1,
+                "subtype": 144, "action": "Update", "user_id": 1000, "user_name": "alice",
+                "performer_id": 1000, "performer_name": "alice",
+                "value_key": "1", "value1": "old", "value2": "new",
+                "unexpected_extra_field": "ignored",
+            },
+        ]
+        csv_bytes = audit_history_csv(rows)
+        lines = csv_bytes.decode("utf-8").splitlines()
+        self.assertEqual(
+            lines[0],
+            "event_id,audit_date,data_id,subtype,action,user_id,user_name,"
+            "performer_id,performer_name,value_key,value1,value2",
+        )
+        self.assertIn("alice", lines[1])
+        self.assertNotIn("unexpected_extra_field", csv_bytes.decode("utf-8"))
+
+    def test_audit_history_csv_handles_empty_rows(self):
+        self.assertEqual(
+            audit_history_csv([]).decode("utf-8").strip(),
+            "event_id,audit_date,data_id,subtype,action,user_id,user_name,"
+            "performer_id,performer_name,value_key,value1,value2",
+        )
+
 
 class VerificationTests(unittest.TestCase):
     def test_verifier_fails_closed_for_simulation_and_unmapped_category(self):
@@ -1889,6 +2072,34 @@ class TransportTests(unittest.TestCase):
             {"156923_2": "1604820"},
         )
 
+    def test_apply_provenance_falls_back_to_put_when_category_already_applied_http_500(self):
+        client = object.__new__(OpenTextCloudClient)
+        client.provenance_category_id = 156923
+        client.provenance_attribute_keys = {"source_data_id": "156923_2"}
+        client.provenance_version_attribute_keys = {}
+        client.provenance_add_endpoint = "/api/v2/nodes/{target_id}/categories"
+        client.provenance_endpoint = "/api/v2/nodes/{target_id}/categories/{category_id}"
+        client.provenance_versions_field = "version_rows"
+        calls = []
+
+        def request(method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            if method == "POST":
+                raise RetryableMigrationError(
+                    'OpenText HTTP 500 for /api/v2/nodes/201024/categories: '
+                    '{"error":"The attribute group \'CDM Migration Provenance\' already exists."}'
+                )
+            return None
+
+        client._request = request
+        client.apply_provenance(170645, {"source_data_id": "1604820"})
+        self.assertEqual([c[0] for c in calls], ["POST", "PUT"])
+        self.assertEqual(calls[1][1], "/api/v2/nodes/170645/categories/156923")
+        self.assertEqual(
+            json.loads(calls[1][2]["data"]["body"]),
+            {"156923_2": "1604820"},
+        )
+
     def test_system_attribute_capabilities_reject_external_dates_as_system_fidelity(self):
         class Response:
             def json(self):
@@ -1930,46 +2141,77 @@ class TransportTests(unittest.TestCase):
         client._request = lambda *_args, **_kwargs: Response()
         self.assertTrue(client._migration_id_matches(999, "CDM:test:123"))
 
+    def test_marker_readback_returns_false_when_category_not_on_node(self):
+        client = object.__new__(OpenTextCloudClient)
+        client.migration_category_id = 108324
+        client.migration_attribute_key = "108324_2"
+
+        def fail_request(*_args, **_kwargs):
+            raise RetryableMigrationError("OpenText HTTP 500: Category ID '108324' is not a category on node '227732'.")
+
+        client._request = fail_request
+        self.assertFalse(client._migration_id_matches(227732, "CDM:test:123"))
+
     def test_container_routes_cover_ordinary_folder_and_business_workspace(self):
         class Response:
             def json(self):
                 return {"results": {"data": {"id": 7654}}}
 
-        cases = (
-            (
-                SourceNode(10, 1, "ordinary", 0, "Folder", 1, "root/ordinary"),
-                "/api/v2/nodes",
-                {"type": 0},
-            ),
-            (
-                SourceNode(11, 1, "workspace", 848, "Project Workspace", 1, "root/workspace"),
-                "/api/v2/businessworkspaces/",
-                {"wksp_type_id": 71, "template_id": 72},
-            ),
-        )
-        for node, expected_endpoint, expected_fields in cases:
-            with self.subTest(subtype=node.subtype):
-                client = object.__new__(OpenTextCloudClient)
-                client.migration_category_id = 1
-                client.migration_attribute_key = "1_2"
-                client.workspace_routes = {
-                    "Project Workspace": {"workspace_type_id": 71, "template_id": 72},
-                }
-                calls = []
+        # 1. Ordinary folder (subtype 0)
+        client = object.__new__(OpenTextCloudClient)
+        client.migration_category_id = 1
+        client.migration_attribute_key = "1_2"
+        calls_ordinary = []
 
-                def request(method, endpoint, calls=calls, **kwargs):
-                    calls.append((method, endpoint, kwargs))
-                    return Response()
+        def request_ordinary(method, endpoint, calls=calls_ordinary, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return Response()
 
-                client._request = request
-                client.find_by_migration_id = lambda *_args, **_kwargs: None
-                self.assertEqual(client.create_container(node, 9000, "CDM:test:10"), 7654)
-                self.assertEqual(calls[0][0], "POST")
-                self.assertEqual(calls[0][1], expected_endpoint)
-                body = json.loads(calls[0][2]["data"]["body"])
-                for key, value in expected_fields.items():
-                    self.assertEqual(body[key], value)
-                self.assertEqual(body["roles"]["categories"]["1_2"], "CDM:test:10")
+        client._request = request_ordinary
+        client.find_by_migration_id = lambda *_args, **_kwargs: None
+        node_ordinary = SourceNode(10, 1, "ordinary", 0, "Folder", 1, "root/ordinary")
+        self.assertEqual(client.create_container(node_ordinary, 9000, "CDM:test:10"), 7654)
+        self.assertEqual(len(calls_ordinary), 1)
+        self.assertEqual(calls_ordinary[0][0], "POST")
+        self.assertEqual(calls_ordinary[0][1], "/api/v2/nodes")
+        body_ord = json.loads(calls_ordinary[0][2]["data"]["body"])
+        self.assertEqual(body_ord["type"], 0)
+        self.assertEqual(body_ord["parent_id"], 9000)
+        self.assertEqual(body_ord["roles"]["categories"]["1_2"], "CDM:test:10")
+
+        # 2. Business Workspace (subtype 848)
+        client_bw = object.__new__(OpenTextCloudClient)
+        client_bw.migration_category_id = 1
+        client_bw.migration_attribute_key = "1_2"
+        client_bw.workspace_routes = {
+            "Project Workspace": {"workspace_type_id": 71, "template_id": 72},
+        }
+        calls_bw = []
+
+        def request_bw(method, endpoint, calls=calls_bw, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            return Response()
+
+        client_bw._request = request_bw
+        client_bw.find_by_migration_id = lambda *_args, **_kwargs: None
+        client_bw._migration_id_matches = lambda *_args, **_kwargs: True
+        node_bw = SourceNode(11, 1, "workspace", 848, "Project Workspace", 1, "root/workspace")
+        self.assertEqual(client_bw.create_container(node_bw, 9000, "CDM:test:11"), 7654)
+        self.assertGreaterEqual(len(calls_bw), 2)
+        # First call: clean workspace POST without 'roles'
+        self.assertEqual(calls_bw[0][0], "POST")
+        self.assertEqual(calls_bw[0][1], "/api/v2/businessworkspaces/")
+        body_bw = json.loads(calls_bw[0][2]["data"]["body"])
+        self.assertEqual(body_bw["wksp_type_id"], 71)
+        self.assertEqual(body_bw["template_id"], 72)
+        self.assertEqual(body_bw["parent_id"], 9000)
+        self.assertNotIn("roles", body_bw)
+        # Second call: marker category attachment
+        self.assertEqual(calls_bw[1][0], "POST")
+        self.assertEqual(calls_bw[1][1], "/api/v2/nodes/7654/categories")
+        marker_body = json.loads(calls_bw[1][2]["data"]["body"])
+        self.assertEqual(marker_body["category_id"], 1)
+        self.assertEqual(marker_body["1_2"], "CDM:test:11")
 
     def test_version_listing_unwraps_gx39_nested_version_shape(self):
         class Response:
@@ -2562,6 +2804,37 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(pilot_owner["status"], "PASS")
                 self.assertEqual(full_owner["status"], "FAIL")
                 self.assertEqual(store.inventory_summary(1)["total_nodes"], 3)
+
+
+class CliOwnerExceptionApprovalTests(unittest.TestCase):
+    def test_run_approval_uses_current_readiness_digest_and_fallback(self):
+        class Pipeline:
+            def owner_readiness(self, **kwargs):
+                self.kwargs = kwargs
+                return {
+                    "status": "APPROVAL_REQUIRED",
+                    "exception_set_digest": "current-digest",
+                    "fallback": {"id": 4300},
+                }
+
+        pipeline = Pipeline()
+        approval = _owner_exception_approval(
+            pipeline, "core_pilot", 15, "operator@example.invalid", "CHG-OWNER-1",
+        )
+        self.assertEqual(
+            approval,
+            {
+                "approved": True,
+                "operator": "operator@example.invalid",
+                "change_record": "CHG-OWNER-1",
+                "exception_set_digest": "current-digest",
+                "fallback_member_id": 4300,
+            },
+        )
+        self.assertEqual(
+            pipeline.kwargs,
+            {"online": True, "max_documents": 15, "core_pilot": True},
+        )
 
 
 if __name__ == "__main__":

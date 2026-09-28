@@ -34,17 +34,18 @@ class PreflightAuditor:
     def run(
         self, *, online: bool = False, sample_blobs: int = 0, for_mode: str | None = None,
         max_documents: int | None = None,
+        core_pilot: bool = False,
         owner_resolutions: list[OwnerResolution] | None = None,
         fallback_approval: dict[str, Any] | None = None,
         service_identity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         checks: list[Check] = []
         self._offline_checks(
-            checks, for_mode, max_documents, owner_resolutions, fallback_approval, service_identity,
+            checks, for_mode, max_documents, core_pilot, owner_resolutions, fallback_approval, service_identity,
         )
         if online:
             self._online_checks(
-                checks, sample_blobs, max_documents, owner_resolutions, fallback_approval,
+                checks, sample_blobs, max_documents, core_pilot, owner_resolutions, fallback_approval,
                 service_identity, for_mode,
             )
         failures = sum(check.status == "FAIL" for check in checks)
@@ -59,12 +60,12 @@ class PreflightAuditor:
 
     def _offline_checks(
         self, checks: list[Check], for_mode: str | None,
-        max_documents: int | None,
+        max_documents: int | None, core_pilot: bool,
         owner_resolutions: list[OwnerResolution] | None,
         fallback_approval: dict[str, Any] | None,
         service_identity: dict[str, Any] | None,
     ) -> None:
-        summary = self.manifest.inventory_summary(max_documents)
+        summary = self.manifest.inventory_summary(max_documents, core_pilot=core_pilot)
         metadata = self.manifest.metadata()
         checks.append(Check(
             "MANIFEST_NOT_EMPTY", "PASS" if summary["total_nodes"] else "FAIL",
@@ -103,8 +104,9 @@ class PreflightAuditor:
         ))
         parity = self.manifest.parity_report(
             self.env,
-            include_qualification=for_mode not in ("pilot", "dry_run"),
+            include_qualification=for_mode not in ("core_pilot", "pilot", "dry_run"),
             max_documents=max_documents,
+            core_pilot=core_pilot,
         )
         parity_failures = [item["id"] for item in parity["checks"] if item["status"] == "FAIL"]
         if for_mode == "dry_run":
@@ -139,7 +141,9 @@ class PreflightAuditor:
                 f"confirmed={freeze['confirmed']}, at={freeze.get('confirmed_at')}, operator={freeze.get('operator')}",
             ))
         with self.manifest.connection() as conn:
-            scope_ids = self.manifest.source_ids_for_scope(max_documents)
+            scope_ids = self.manifest.source_ids_for_scope(
+                max_documents, core_pilot=core_pilot,
+            )
             node_scope, node_params = self.manifest._scope_clause(scope_ids, "source_id")
             version_scope, version_params = self.manifest._scope_clause(scope_ids, "doc_source_id")
             category_scope, category_params = self.manifest._scope_clause(scope_ids, "source_id")
@@ -329,6 +333,7 @@ class PreflightAuditor:
     def _online_checks(
         self, checks: list[Check], sample_blobs: int,
         max_documents: int | None,
+        core_pilot: bool,
         owner_resolutions: list[OwnerResolution] | None,
         fallback_approval: dict[str, Any] | None,
         service_identity: dict[str, Any] | None,
@@ -353,26 +358,27 @@ class PreflightAuditor:
                 "TARGET_ROOT", "PASS" if int(props.get("id", -1)) == root_id else "FAIL",
                 f"id={props.get('id')}, name={props.get('name')}, type={props.get('type')}",
             ))
+            deferred = for_mode in ("core_pilot", "dry_run")
             owner_route_ready = bool(self.env.get("owner_assignment_qualified"))
             checks.append(Check(
                 "OWNER_ASSIGNMENT_QUALIFICATION",
-                "PASS" if owner_route_ready else "DEFERRED" if for_mode == "dry_run" else "FAIL",
+                "PASS" if owner_route_ready else "DEFERRED" if deferred else "FAIL",
                 "Ordinary folders/documents and every Business Workspace route require a qualified owner-write path.",
             ))
             provenance_route_ready = bool(self.env.get("provenance_category_qualified"))
             checks.append(Check(
                 "PROVENANCE_APPLICABILITY",
-                "PASS" if provenance_route_ready else "DEFERRED" if for_mode == "dry_run" else "FAIL",
+                "PASS" if provenance_route_ready else "DEFERRED" if deferred else "FAIL",
                 "CDM Migration Provenance must be applicable and writable on every migrated object type.",
             ))
             checks.append(Check(
                 "PROVENANCE_READBACK_QUALIFICATION",
-                "PASS" if bool(self.env.get("provenance_readback_qualified")) else "DEFERRED" if for_mode == "dry_run" else "FAIL",
+                "PASS" if bool(self.env.get("provenance_readback_qualified")) else "DEFERRED" if deferred else "FAIL",
                 "Provenance values and ordered version rows require qualified target read-back.",
             ))
             checks.append(Check(
                 "CREATOR_READBACK_QUALIFICATION",
-                "PASS" if bool(self.env.get("creator_readback_qualified")) else "DEFERRED" if for_mode == "dry_run" else "FAIL",
+                "PASS" if bool(self.env.get("creator_readback_qualified")) else "DEFERRED" if deferred else "FAIL",
                 "Created By must be readable and identify the migration service account.",
             ))
             if owner_resolutions is not None:
@@ -400,7 +406,9 @@ class PreflightAuditor:
                     f"service_member_id={service_identity.get('id')}",
                 ))
             with self.manifest.connection() as conn:
-                scope_ids = self.manifest.source_ids_for_scope(max_documents)
+                scope_ids = self.manifest.source_ids_for_scope(
+                    max_documents, core_pilot=core_pilot,
+                )
                 _, version_params = self.manifest._scope_clause(scope_ids, "doc_source_id")
                 version_scope, _ = self.manifest._scope_clause(scope_ids, "doc_source_id")
                 heavy = conn.execute(
@@ -423,7 +431,9 @@ class PreflightAuditor:
             try:
                 source = build_binary_source(self.env)
                 with self.manifest.connection() as conn:
-                    scope_ids = self.manifest.source_ids_for_scope(max_documents)
+                    scope_ids = self.manifest.source_ids_for_scope(
+                        max_documents, core_pilot=core_pilot,
+                    )
                     version_scope, version_params = self.manifest._scope_clause(
                         scope_ids, "doc_source_id"
                     )

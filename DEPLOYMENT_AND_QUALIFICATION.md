@@ -221,6 +221,10 @@ in any qualified tenant — do not let this drift from what is actually deployed
    for every migrated object and as the object owner until the final OWNER
    phase reassigns it to the resolved target owner. Its exact login/email must
    be entered in the profile so the client can verify creator read-back.
+   - GX39 TEST qualified migration service account: login `PZMIG_TEST_TECH_ACC`,
+     member ID `84116`.
+   - GX39 TEST qualified owner fallback for unresolved R&D source owners:
+     login `PZMIG_TEST_TECH_ACC`, member ID `84116`.
 
 4. **Attribute type for every date/time provenance field must be `datetime`,
    never `date`.** GX39 silently truncates `date`-typed attributes to midnight

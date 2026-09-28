@@ -517,10 +517,11 @@ class ManifestStore:
         *,
         include_qualification: bool = True,
         max_documents: int | None = None,
+        core_pilot: bool = False,
     ) -> dict[str, Any]:
         """Describe whether the extracted scope can be recreated functionally 1:1."""
         with self.connection() as conn:
-            scope_ids = self._selected_nodes(conn, max_documents)
+            scope_ids = self._selected_nodes(conn, max_documents, core_pilot=core_pilot)
             node_scope, node_params = self._scope_clause(scope_ids, "source_id")
             version_scope, version_params = self._scope_clause(scope_ids, "doc_source_id")
             category_scope, category_params = self._scope_clause(scope_ids, "source_id")
@@ -551,8 +552,10 @@ class ManifestStore:
             ).fetchone()[0]
             missing_references = conn.execute(
                 f"""SELECT COUNT(*) FROM manifest_nodes
-                   WHERE (subtype=1 AND json_extract(extra_json,'$.reference_source_id') IS NULL)
-                     OR (subtype=140 AND COALESCE(json_extract(extra_json,'$.url'),'')=''){node_scope}""",
+                   WHERE (
+                     (subtype=1 AND json_extract(extra_json,'$.reference_source_id') IS NULL)
+                     OR (subtype=140 AND COALESCE(json_extract(extra_json,'$.url'),'')='')
+                   ){node_scope}""",
                 node_params,
             ).fetchone()[0]
             reference_scope, reference_params = self._scope_clause(scope_ids, "ref.source_id")
@@ -716,6 +719,7 @@ class ManifestStore:
         add(
             "HISTORICAL_AUDIT_SCOPE", bool(environment.get("historical_audit_out_of_scope_approved")),
             "historical Content Server audit events are not recreated by this tool",
+            qualification=core_pilot,
         )
         add(
             "PERSONAL_STATE_SCOPE", bool(environment.get("personal_state_out_of_scope_approved")),
@@ -767,6 +771,7 @@ class ManifestStore:
         root_node_id: int,
         *,
         max_documents: int | None = None,
+        core_pilot: bool = False,
         config_fingerprint: str | None = None,
         source_snapshot: str | None = None,
         metadata_contract_version: str = METADATA_CONTRACT_VERSION,
@@ -800,7 +805,7 @@ class ManifestStore:
                     service_identity.get("email") if service_identity else None,
                 ),
             )
-            selected_nodes = self._selected_nodes(conn, max_documents)
+            selected_nodes = self._selected_nodes(conn, max_documents, core_pilot=core_pilot)
             for row in conn.execute("SELECT source_id,subtype FROM manifest_nodes ORDER BY depth,source_id"):
                 phase = _phase_for_subtype(row["subtype"])
                 if selected_nodes is not None and row["source_id"] not in selected_nodes:
@@ -908,9 +913,11 @@ class ManifestStore:
                 )
         return run_id
 
-    def owner_ids_for_scope(self, max_documents: int | None = None) -> set[int]:
+    def owner_ids_for_scope(
+        self, max_documents: int | None = None, *, core_pilot: bool = False,
+    ) -> set[int]:
         """Return distinct source owners represented by the exact run scope."""
-        scope_ids = self.source_ids_for_scope(max_documents)
+        scope_ids = self.source_ids_for_scope(max_documents, core_pilot=core_pilot)
         with self.connection() as conn:
             if scope_ids is None:
                 rows = conn.execute(
@@ -924,10 +931,12 @@ class ManifestStore:
                 ).fetchall()
         return {int(row[0]) for row in rows}
 
-    def source_ids_for_scope(self, max_documents: int | None = None) -> set[int] | None:
+    def source_ids_for_scope(
+        self, max_documents: int | None = None, *, core_pilot: bool = False,
+    ) -> set[int] | None:
         """Return the exact source node scope, or None when the full manifest is selected."""
         with self.connection() as conn:
-            selected_nodes = self._selected_nodes(conn, max_documents)
+            selected_nodes = self._selected_nodes(conn, max_documents, core_pilot=core_pilot)
             if selected_nodes is None:
                 rows = conn.execute(
                     "SELECT source_id FROM manifest_nodes"
@@ -989,24 +998,29 @@ class ManifestStore:
         return dict(row) if row else None
 
     def _selected_nodes(
-        self, conn: sqlite3.Connection, max_documents: int | None,
+        self, conn: sqlite3.Connection, max_documents: int | None, *, core_pilot: bool = False,
     ) -> set[int] | None:
         if not max_documents:
             return None
-        selected_nodes = set(self._representative_pilot_documents(conn, max_documents))
-        selected_nodes.update(
-            int(row[0]) for row in conn.execute(
-                "SELECT source_id FROM manifest_nodes WHERE subtype IN (1,140) "
-                "ORDER BY subtype,source_id LIMIT 20"
-            )
+        selected_nodes = set(
+            self._core_pilot_documents(conn, max_documents)
+            if core_pilot else self._representative_pilot_documents(conn, max_documents)
         )
-        for row in conn.execute(
-            "SELECT source_id,extra_json FROM manifest_nodes WHERE source_id IN "
-            "(SELECT source_id FROM manifest_nodes WHERE subtype=1 ORDER BY source_id LIMIT 20)"
-        ):
-            referenced = json.loads(row["extra_json"]).get("reference_source_id")
-            if referenced is not None:
-                selected_nodes.add(int(referenced))
+        if not core_pilot:
+            selected_nodes.update(
+                int(row[0]) for row in conn.execute(
+                    "SELECT source_id FROM manifest_nodes WHERE subtype IN (1,140) "
+                    "ORDER BY subtype,source_id LIMIT 20"
+                )
+            )
+        if not core_pilot:
+            for row in conn.execute(
+                "SELECT source_id,extra_json FROM manifest_nodes WHERE source_id IN "
+                "(SELECT source_id FROM manifest_nodes WHERE subtype=1 ORDER BY source_id LIMIT 20)"
+            ):
+                referenced = json.loads(row["extra_json"]).get("reference_source_id")
+                if referenced is not None:
+                    selected_nodes.add(int(referenced))
         parents = {
             parent_row["source_id"]: parent_row["parent_source_id"]
             for parent_row in conn.execute("SELECT source_id,parent_source_id FROM manifest_nodes")
@@ -1017,6 +1031,43 @@ class ManifestStore:
                 selected_nodes.add(parent_id)
                 parent_id = parents.get(parent_id)
         return selected_nodes
+
+    @staticmethod
+    def _core_pilot_documents(conn: sqlite3.Connection, limit: int) -> set[int]:
+        """Select ordinary, small, metadata-safe documents for an isolated core test.
+
+        This deliberately excludes shortcuts, versions with comments, documents
+        requiring multipart transfer, and values that require a source-user to
+        GX39-user conversion. It is not a replacement for a representative
+        Pilot or Full Cutover qualification.
+        """
+        rows = conn.execute(
+            """
+            SELECT n.source_id
+              FROM manifest_nodes n
+             WHERE n.subtype IN (136,144,154,749,751)
+               AND EXISTS (
+                   SELECT 1 FROM manifest_versions v
+                    WHERE v.doc_source_id=n.source_id
+                      AND v.data_size > 0
+                      AND v.data_size < 52428800
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM manifest_versions v
+                    WHERE v.doc_source_id=n.source_id
+                      AND COALESCE(v.source_comment,'')<>''
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM manifest_categories c
+                    WHERE c.source_id=n.source_id
+                      AND c.value_json<>'null'
+               )
+             ORDER BY n.source_id
+             LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return {int(row[0]) for row in rows}
 
     @staticmethod
     def _representative_pilot_documents(conn: sqlite3.Connection, limit: int) -> set[int]:
@@ -1550,9 +1601,11 @@ class ManifestStore:
             ).fetchall()
             return {row["state"]: row["n"] for row in rows}
 
-    def inventory_summary(self, max_documents: int | None = None) -> dict[str, Any]:
+    def inventory_summary(
+        self, max_documents: int | None = None, *, core_pilot: bool = False,
+    ) -> dict[str, Any]:
         with self.connection() as conn:
-            scope_ids = self._selected_nodes(conn, max_documents)
+            scope_ids = self._selected_nodes(conn, max_documents, core_pilot=core_pilot)
             node_scope, node_params = self._scope_clause(scope_ids, "source_id")
             version_scope, version_params = self._scope_clause(scope_ids, "doc_source_id")
             row = conn.execute(

@@ -93,21 +93,6 @@ class SourceDB:
             node_ids = [row["source_id"] for row in nodes]
             versions = self._extract_versions(conn, node_ids)
             categories = self._extract_categories(conn, node_ids)
-            owner_ids = sorted({
-                int(row["owner_id"]) for row in nodes if row.get("owner_id") is not None
-            })
-            # Business Workspace (subtype 848) content commonly encodes an owner that is
-            # not an individual KUAF principal: qualified read-only against a real
-            # production workspace confirmed (a) the workspace node itself may carry a
-            # Content Server system/reserved OwnerID with no live KUAF row, shared across
-            # multiple workspaces, and (b) its descendants may inherit the workspace's own
-            # DataID as OwnerID (role-group-based ownership: no PermID on the workspace,
-            # auto-generated Confidential/Editors/Managers/Readers KUAF role groups scoped
-            # to the workspace instead). Recognize only these two deterministic,
-            # source-verified patterns as SYSTEM_OWNER so the offline readiness gate can
-            # route them through the existing approved-fallback mechanism instead of a
-            # silent conversion; every other unmatched OwnerID remains UNKNOWN and still
-            # fails closed.
             workspace_dataids = {
                 int(row["source_id"]) for row in nodes if row.get("subtype") == 848
             }
@@ -116,12 +101,62 @@ class SourceDB:
                 if row.get("subtype") == 848 and row.get("owner_id") is not None
             }
             system_owner_ids = frozenset(workspace_dataids | workspace_owner_ids)
+            # In Business Workspaces (subtype 848), Content Server assigns the workspace's
+            # own DataID as OwnerID to all descendants and a system code (-2000) to the
+            # workspace itself. When a valid human creator (CreatedBy) exists, map the node's
+            # effective source owner to that creator so provenance preserves real author
+            # identity (login, email, name) and active cloud users can be resolved directly.
+            for row in nodes:
+                eff_owner = row.get("owner_id")
+                if eff_owner in system_owner_ids or (eff_owner is not None and eff_owner <= 0):
+                    created_by = row.get("created_by") or (row.get("extra") or {}).get("created_by")
+                    if created_by is not None:
+                        try:
+                            cb_val = int(created_by)
+                            if cb_val > 0:
+                                row["owner_id"] = cb_val
+                        except (TypeError, ValueError):
+                            pass
+            owner_ids = sorted({
+                int(row["owner_id"]) for row in nodes if row.get("owner_id") is not None
+            })
             owners = self._extract_owners(conn, owner_ids, system_owner_ids)
         return {
             "nodes": nodes, "versions": versions, "categories": categories, "owners": owners,
             "snapshot": snapshot_id, "extracted_at": datetime.now(UTC).isoformat(),
             "source_signature": source_signature(nodes, versions, categories, owners),
         }
+
+    def export_audit_history(self, scope_ids: list[int]) -> list[dict[str, Any]]:
+        """Read-only export of the classic Content Server audit trail (`dauditnew`,
+        a view over `dauditnewcore`) for a given set of source node IDs.
+
+        This does not migrate audit data into GX39 -- audit trails are
+        system-generated, tamper-evident records of real actions, and GX39
+        exposes no supported API to backdate historical events into its own
+        audit log. This is a supplementary, read-only snapshot so the source
+        history is not lost, per the `historical_audit_out_of_scope_approved`
+        qualification item (see `AGENTS.md` section 5a and
+        `DEPLOYMENT_AND_QUALIFICATION.md`); see `engine/audit_export.py` for the
+        CSV rendering and optional upload as a supplementary document.
+        """
+        if not scope_ids:
+            return []
+        query = f"""
+            SELECT a.EventID event_id, a.AuditDate audit_date, a.DataID data_id,
+                   a.SubType subtype, a.AuditStr action,
+                   a.UserID user_id, u.Name user_name,
+                   a.PerformerID performer_id, p.Name performer_name,
+                   a.ValueKey value_key, a.Value1 value1, a.Value2 value2
+              FROM {self._schema}.dauditnew a
+              LEFT JOIN {self._schema}.KUAF u ON u.ID=a.UserID
+              LEFT JOIN {self._schema}.KUAF p ON p.ID=a.PerformerID
+             WHERE a.DataID=ANY(%s)
+             ORDER BY a.AuditDate,a.EventID
+        """
+        with self.snapshot() as (conn, _snapshot_id), self._cursor(conn) as cur:
+            cur.execute(query, (list(scope_ids),))
+            return [dict(row) for row in cur.fetchall()]
 
     def inspect_scope(self, root_node_id: int) -> dict[str, Any]:
         """Read-only preview used before committing a manifest extraction."""
@@ -143,6 +178,7 @@ class SourceDB:
         url_column = self._first_existing_column(conn, "dtree", ("url",))
         description_column = self._first_existing_column(conn, "dtree", ("comment", "description"))
         reserved_column = self._first_existing_column(conn, "dtree", ("reservedby", "reserved"))
+        created_by_column = self._first_existing_column(conn, "dtree", ("createdby", "created_by"))
         root_reference = f"d.{reference_column}" if reference_column else "NULL::integer"
         child_reference = f"c.{reference_column}" if reference_column else "NULL::integer"
         root_url = f"d.{url_column}" if url_column else "NULL::text"
@@ -151,6 +187,8 @@ class SourceDB:
         child_description = f"c.{description_column}" if description_column else "''::text"
         root_reserved = f"d.{reserved_column}" if reserved_column else "NULL::integer"
         child_reserved = f"c.{reserved_column}" if reserved_column else "NULL::integer"
+        root_created_by = f"d.{created_by_column}" if created_by_column else "NULL::bigint"
+        child_created_by = f"c.{created_by_column}" if created_by_column else "NULL::bigint"
         # In the observed classic CS schema, workspace W (848) stores content
         # below -W (849, ParentID=-1). Visit that source-only container without
         # adding a visible depth/path segment; retain both IDs in the cycle guard.
@@ -164,12 +202,14 @@ class SourceDB:
                 SELECT d.DataID,d.ParentID,d.Name,d.SubType,d.CreateDate,d.ModifyDate,
                        d.OwnerID,d.PermID,{root_reference} reference_source_id,{root_url} url_value,
                        {root_description} description_value,{root_reserved} reserved_by,
+                       {root_created_by} created_by,
                        0 AS depth,ARRAY[d.DataID] AS path_ids,d.Name::text AS full_path
                   FROM {self._schema}.DTree d WHERE d.DataID=%s AND COALESCE(d.Deleted,0)=0
                 UNION ALL
                 SELECT c.DataID,c.ParentID,c.Name,c.SubType,c.CreateDate,c.ModifyDate,
                        c.OwnerID,c.PermID,{child_reference},{child_url},
                        {child_description},{child_reserved},
+                       {child_created_by} created_by,
                        CASE WHEN {shadow_jump} THEN w.depth ELSE w.depth+1 END,
                        w.path_ids||c.DataID,
                        CASE WHEN {shadow_jump} THEN w.full_path
@@ -181,7 +221,7 @@ class SourceDB:
             SELECT DataID source_id,ParentID parent_source_id,Name name,SubType subtype,
                    depth,full_path path,COALESCE(description_value,'')::text description,
                    CreateDate create_date,ModifyDate modify_date,
-                   OwnerID owner_id,NULL::integer group_id,PermID permissions_id,
+                   OwnerID owner_id,created_by,NULL::integer group_id,PermID permissions_id,
                    reference_source_id,url_value,reserved_by
               FROM workspace_tree ORDER BY depth,source_id
         """
@@ -191,11 +231,13 @@ class SourceDB:
         rows = self._normalize_workspace_containers(rows)
         for row in rows:
             row["type_name"] = SUBTYPE_NAMES.get(row["subtype"], f"Type_{row['subtype']}")
+            created_by = row.pop("created_by", None)
             row["extra"] = {
                 key: value for key, value in {
                     "reference_source_id": row.pop("reference_source_id", None),
                     "url": row.pop("url_value", None),
                     "reserved_by": row.pop("reserved_by", None),
+                    "created_by": created_by,
                 }.items() if value is not None
             }
         return rows
@@ -334,7 +376,13 @@ class SourceDB:
                    {row_expr} row_num,a.ValStr val_str,a.ValLong val_long,a.ValDate val_date,
                    {real_expr} val_real,{int_expr} val_int
               FROM {self._schema}.LLAttrData a LEFT JOIN {self._schema}.DTree d ON a.DefID=d.DataID
-             WHERE a.ID=ANY(%s) ORDER BY a.ID,a.DefID,a.AttrID,{row_expr}
+              WHERE a.ID=ANY(%s)
+                AND NOT (a.AttrID=1 AND a.ValStr=d.Name)
+                AND (
+                    a.ValStr IS NOT NULL OR a.ValLong IS NOT NULL OR a.ValDate IS NOT NULL
+                    OR {real_expr} IS NOT NULL OR {int_expr} IS NOT NULL
+                )
+              ORDER BY a.ID,a.DefID,a.AttrID,{row_expr}
         """
         with self._cursor(conn) as cur:
             cur.execute(query, (node_ids,))

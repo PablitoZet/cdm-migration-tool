@@ -29,9 +29,11 @@ def main() -> int:
     preflight.add_argument("--online", action="store_true")
     preflight.add_argument("--sample-blobs", type=int, default=0)
     run_command = sub.add_parser("run")
-    run_command.add_argument("--mode", choices=("dry_run", "pilot", "full"), required=True)
+    run_command.add_argument("--mode", choices=("dry_run", "core_pilot", "pilot", "full"), required=True)
     run_command.add_argument("--threads", type=int, default=8)
     run_command.add_argument("--max-documents", type=int)
+    run_command.add_argument("--owner-exception-operator")
+    run_command.add_argument("--owner-exception-change-record")
     recover = sub.add_parser("recover")
     recover.add_argument("run_id")
     recover.add_argument("--threads", type=int, default=8)
@@ -46,6 +48,10 @@ def main() -> int:
     inspect_target = sub.add_parser("inspect-target")
     inspect_target.add_argument("--node-id", type=int)
     sub.add_parser("compatibility")
+    audit_export = sub.add_parser("export-audit-history")
+    audit_export.add_argument("--output")
+    audit_export.add_argument("--upload-to", type=int)
+    audit_export.add_argument("--max-documents", type=int)
     freeze = sub.add_parser("confirm-freeze")
     freeze.add_argument("--operator", required=True)
     freeze.add_argument("--note", default="")
@@ -68,10 +74,18 @@ def main() -> int:
         return 2 if report["status"] == "FAIL" else 0
     if args.command == "run":
         _confirm_production(cfg.environment())
-        max_docs = args.max_documents or (100 if args.mode == "pilot" else None)
+        max_docs = args.max_documents or (15 if args.mode == "core_pilot" else 100 if args.mode == "pilot" else None)
+        owner_exception_approval = _owner_exception_approval(
+            pipeline,
+            args.mode,
+            max_docs,
+            args.owner_exception_operator,
+            args.owner_exception_change_record,
+        )
         run_id = pipeline.start_migration(
             max_items=max_docs, dry_run=args.mode == "dry_run",
             threads=args.threads, mode=args.mode,
+            owner_exception_approval=owner_exception_approval,
         )
         return _watch(pipeline, run_id)
     if args.command == "recover":
@@ -102,6 +116,18 @@ def main() -> int:
         report = pipeline.manifest.parity_report(cfg.environment())
         _print(report)
         return 0 if report["status"] == "PASS" else 5
+    if args.command == "export-audit-history":
+        if args.upload_to:
+            _confirm_production(cfg.environment())
+        result = pipeline.export_audit_history(
+            upload_parent_id=args.upload_to, max_documents=args.max_documents
+        )
+        content = result.pop("content")
+        output_path = Path(args.output) if args.output else ROOT / f"Source_Audit_History_{result['source_root_id']}.csv"
+        output_path.write_bytes(content)
+        result["local_path"] = str(output_path)
+        _print(result)
+        return 0
     if args.command == "confirm-freeze":
         _confirm_production(cfg.environment())
         _print(pipeline.confirm_source_freeze(args.operator, args.note))
@@ -125,6 +151,48 @@ def _watch(pipeline: MigrationPipeline, run_id: str) -> int:
 
 def _print(value) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+
+
+def _owner_exception_approval(
+    pipeline: MigrationPipeline,
+    mode: str,
+    max_documents: int | None,
+    operator: str | None,
+    change_record: str | None,
+) -> dict[str, object] | None:
+    readiness = pipeline.owner_readiness(
+        online=True,
+        max_documents=max_documents,
+        core_pilot=mode == "core_pilot",
+    )
+    if readiness["status"] == "PASS":
+        if operator or change_record:
+            raise SystemExit(
+                "Owner-exception approval was supplied, but the selected scope has no owner exceptions"
+            )
+        return None
+    if readiness["status"] != "APPROVAL_REQUIRED":
+        raise SystemExit(
+            f"Owner readiness is {readiness['status']}; resolve it before starting the run"
+        )
+    if not operator or not change_record:
+        raise SystemExit(
+            "Owner exceptions require --owner-exception-operator and "
+            "--owner-exception-change-record"
+        )
+    fallback = readiness["fallback"]
+    if not isinstance(fallback, dict) or fallback.get("id") is None:
+        raise SystemExit("Owner readiness did not return an active fallback principal")
+    digest = readiness["exception_set_digest"]
+    if not isinstance(digest, str) or not digest:
+        raise SystemExit("Owner readiness did not return an exception digest")
+    return {
+        "approved": True,
+        "operator": operator,
+        "change_record": change_record,
+        "exception_set_digest": digest,
+        "fallback_member_id": fallback["id"],
+    }
 
 
 def _confirm_production(environment) -> None:

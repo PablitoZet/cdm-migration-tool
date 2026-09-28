@@ -1,6 +1,6 @@
 # Corporate-machine engineering handoff
 
-Last updated: 2026-09-11
+Last updated: 2026-09-15
 
 This document is the current checkpoint for continuing development and
 qualification on the corporate machine. It records what has already been
@@ -348,6 +348,119 @@ or at larger scale:
 Tenant adaptations belong in `engine/client.py` with regression tests. Do not
 scatter tenant response-shape exceptions through the pipeline.
 
+### 5a. Business Workspace template candidate — GX39 DEV access evidence
+
+Read-only evidence collected 2026-09-15 for the proposed GX39 DEV template
+`38920`, `[Obsolete] R&D CI WS Template 001`:
+
+- The migration service account can read the node and its category endpoint
+  (`GET /api/v2/nodes/38920` and
+  `GET /api/v2/nodes/38920/categories`, both HTTP 200). This resolves the
+  earlier access barrier observed for node `328434`; the migration account has
+  sufficient read access to investigate node `38920`.
+- The GX39 node is type `848` (Business Workspace), with parent `2316`, owner
+  `Admin`, and no directly assigned category values. The latter is not a
+  mismatch by itself: the matching production source template node
+  `763418`, `R&D CI WS Template 001`, is also subtype `848` and likewise has
+  no directly assigned `LLAttrData` category values.
+- The matching title and Business Workspace type make the administrator's
+  statement that `38920` is the migrated DEV copy of the source template
+  plausible. However, it is **not yet a qualified workspace creation route**:
+  querying the source's known `xengtranstemplates` workspace-to-template
+  relationship table found no row connecting the production migration root
+  workspace `763886` to source node `763418`. Therefore the database evidence
+  currently cannot prove that this is the exact template used by `763886`;
+  the administrator must confirm that relationship from the xECM
+  configuration.
+- Do not change `workspace_routes` from the currently configured route or
+  create a real target Business Workspace merely on this evidence. After the
+  administrator confirms the relationship, qualify `38920` by creating one
+  isolated test Business Workspace under the approved DEV test parent, then
+  read back its categories, roles, owner/creator and duplicate marker. This
+  target-write test must also establish the exact DEV category IDs/attribute
+  keys for the two source definitions (`762577` and `762581`); the template
+  node's empty category-values response cannot provide those mappings.
+
+#### Category-mapping information required before the first Business Workspace Pilot
+
+As of 2026-09-15, `GET /api/v2/nodes/38920/categories` returns an empty
+result. This is expected for a template node with no directly assigned
+category *values*, but it means the tool cannot derive target category
+identifiers from that endpoint. The generic read-only Business Workspace
+create form is accessible under the approved DEV parent `87457`, confirming
+that the account can inspect the target form; it does not expose the
+template's category schema. The category-create form reports that an explicit
+`category_id` is required, so it cannot safely enumerate unknown tenant
+categories.
+
+Ask the GX39 administrator to open the Category/Attribute administration view
+for the two DEV categories attached to the Business Workspace type/template
+used by `38920`. For each attribute, the administrator must provide the
+numeric `categoryID_attributeID` key shown by that view or its form/API
+definition. A screenshot is sufficient if it visibly includes each category
+ID, attribute ID/key, label and type; never send account credentials.
+
+Required source-to-target correspondence:
+
+| Source category / definition | Source attribute | Required target value |
+| --- | --- | --- |
+| `R&D_CI_Document_Information` / `762577` | `1` (name) | target category ID and `categoryID_attributeID` |
+| `R&D_CI_Document_Information` / `762577` | `2` (status) | target category ID and `categoryID_attributeID`; include allowed values |
+| `R&D_CI_Document_Information` / `762577` | `3` (related DataID) | target category ID and `categoryID_attributeID`; identify whether it is a node reference or text |
+| `R&D_CI_Info_Sec_Classification` / `762581` | `1` (name) | target category ID and `categoryID_attributeID` |
+| `R&D_CI_Info_Sec_Classification` / `762581` | `2` (classification) | target category ID and `categoryID_attributeID`; include allowed values |
+
+On receipt, enter the values as `category_mappings` in local `config.json`
+using `engine.manifest.ManifestStore.apply_category_mappings`' documented
+shape. Do not infer attribute IDs from labels, reuse IDs from another tenant,
+or mark `CATEGORY_MAPPING` as accepted without these values.
+
+### 5b. Evidence gathered for `active_workflows_confirmed_zero` and
+`personal_state_out_of_scope_approved` (workspace 763886, 29,229-node scope)
+
+Read-only PostgreSQL evidence collected 2026-09-14 against the production
+source database, in scope of the 29,229 nodes already extracted into
+`migration_state_v2_production.db`. Recorded here so the operator does not
+have to re-derive this before the real production cutover.
+
+- **`active_workflows_confirmed_zero`** — safe to approve. All classic
+  Content Server XML Workflow tables (`wfattrdata`, `wfattrdataversions`,
+  `wfcomments`, `wfdispositions`, `wfforms`, `wfformslock`,
+  `wfformsversions`, `wfassignmentsconfiguration`) contain **zero rows
+  instance-wide**, not only in scope. `xecmgov_dynwfactivitytaskevents` (13
+  rows) is a static event-type enum, not instance data.
+  `kuafrightslistworkflow` (7,684 rows) is the unrelated Rights List
+  access-control feature, not business-process workflow data. Conclusion:
+  there are no active or historical workflow instances anywhere in the
+  source system, so nothing needs to be built or migrated for workflow
+  scope — this flag is a confirmation of fact, not a feature gap.
+
+- **`personal_state_out_of_scope_approved`** — NOT a no-op; a real, bounded
+  exclusion. Notification/subscription tables (`dtreenotify`,
+  `dtreeaspectsnotify`, `dtreenotifyrecover`, `dtreesyncinterests`,
+  `dtreevectornotify`, `elinksubscription`, `notifyevents`,
+  `notifymessages`, `notifyinterests2`) are all empty (0 rows) instance-wide.
+  The only substantive item is `dfavorites`: **105 rows in scope, across 60
+  distinct KUAF `userid`s** (out of only 116 favorites rows in the *entire*
+  source instance — ~90% of all favorites system-wide belong to this one
+  workspace). This tool does not migrate favorites (by design, see
+  `ARCHITECTURE.md`). The only consequence of approving this flag is that
+  those ~60 users will need to manually re-add the workspace to their
+  favorites on GX39 after cutover. Recommendation: notify those users ahead
+  of the real cutover so this is not a surprise.
+
+- **`historical_audit_out_of_scope_approved`** — NOT a no-op; a real,
+  substantial exclusion. `dauditnew`/`dauditnewcore` (Content Server audit
+  trail) contain **128,701 rows in scope** (of 386,931 instance-wide, ~33%
+  of the entire instance's audit trail), spanning `auditdate` 2025-05-29 to
+  present. This history is not migrated by this tool; GX39 starts a fresh
+  audit trail at cutover. A meaningful share of these audit rows are
+  category-attribute-change events (`valuekey` values `762577`/`762581`
+  match the two source category definitions used by this workspace,
+  ~1,925 rows each). This is a genuine, informed business-acceptance
+  decision, not a formality — confirm with the workspace's business owner
+  before approving.
+
 ## 6. Important limitation of the current Dry Run
 
 Current Dry Run validates manifest structure, node rules, version sizes recorded
@@ -532,3 +645,294 @@ Use the following intent, adapted with the sanitized test result:
 
 This handoff is deliberately explicit so a faster or less capable agent does
 not confuse planned work with implemented functionality.
+
+## 11. Active handoff - 2026-09-15 evening
+
+This section is the current continuation point for the next agent. It
+supersedes older "next step" wording above where the two differ, but it does
+not override the safety rules in `AGENTS.md`.
+
+### Operator objective
+
+The operator wants a deliberately limited, real-data DEV test to validate the
+core migration path before spending time proving that the DEV/PROD Business
+Workspace template is a 1:1 reconstruction of on-premise configuration.
+This is not production approval.
+
+Current source and target:
+
+- source root: `763886` (the production Business Workspace in on-prem);
+- target parent: `87457` (GX39 DEV `CDM_Migration_Sandbox`);
+- profile key: `production` (this retains production safety gates because the
+  source is production data, even though the target is GX39 DEV);
+- route for source workspace `763886`: `workspace_type_id=1`,
+  `template_id=38920` (`[Obsolete] R&D CI WS Template 001`);
+- `source_root_maps_to_target=false`;
+- permission strategy: `inherit_target`;
+- `target_acl_approved=true`.
+
+The operator approved the Core Pilot owner fallback with:
+
+- operator: `zawodpwe`;
+- change record: `Dev-Test-Small-Pilot-R&D-Real-Data`.
+
+Do not copy or print credentials, passwords, tickets, SAS URLs or the service
+account login/e-mail from local `config.json`. The tenant-local migration
+account was read back through GX39 `GET /api/v2/members/84116` (`PZMIG_TEST_TECH_ACC`)
+and is active; the local configuration uses `service_account_member_id=84116`,
+`service_account_login="PZMIG_TEST_TECH_ACC"`, and uses `PZMIG_TEST_TECH_ACC`
+(member `84116`) as `owner_fallback`.
+
+### Implemented in the current uncommitted worktree
+
+The following changes were made and validated, but have not been committed:
+
+1. Added `RunMode.CORE_PILOT` and CLI mode `core_pilot`.
+2. Core Pilot selection is deterministic, includes required ancestors, and
+   excludes shortcuts/URL references, documents with any non-empty category
+   value, versions with comments, and versions at or above the 50 MiB
+   multipart threshold.
+3. Core Pilot scope is passed through manifest selection, inventory, owner
+   resolution, preflight, online blob checks and run creation.
+4. Core Pilot deliberately defers tenant qualifications that it is intended
+   to exercise after the write: owner assignment, provenance
+   applicability/readback and creator readback. It does not disable ordinary
+   verification.
+5. `engine/db.py` no longer stores the technical `AttrID=1` category-name row
+   when its value equals the node name, and omits completely empty primitive
+   category rows.
+6. Fallback/service-account resolution supports a direct, read-only member GET
+   by an explicitly configured tenant-local member ID, while still requiring
+   active status and exact configured login/e-mail read-back.
+7. The CLI accepts `--owner-exception-operator` and
+   `--owner-exception-change-record` and binds approval to the freshly
+   calculated exception digest.
+8. A directly related SQL scope bug in shortcut fidelity checking was fixed:
+   the selected-node predicate now applies to the complete parenthesized
+   reference condition.
+9. Regression coverage was added for Core Pilot selection and CLI approval
+   digest binding.
+
+Validation after these changes:
+
+```text
+111 unittest tests: PASS
+ruff check .: PASS
+mypy app.py engine tests: PASS
+```
+
+`pytest` is not installed in the local virtual environment; the repository's
+existing `unittest` suite is the runner used here.
+
+### Current local state and configuration
+
+The application-level SQLite backup command was used before each manifest
+refresh. These local, gitignored files are sensitive state and must not be
+deleted or copied with filesystem commands:
+
+- `migration_state_v2_production_before_category_pilot_20260915.db`;
+- `migration_state_v2_production_before_core_pilot_20260915.db`.
+
+The latest forced extraction completed successfully:
+
+```text
+snapshot: 464030186:464030186:
+nodes: 29252
+containers: 6438
+documents: 22809
+versions: 24420
+bytes: 161031852220
+```
+
+The current local profile has `category_mappings={}`. This is intentional for
+the Core Pilot because its selected documents have no non-empty category
+values, so the scoped `CATEGORY_MAPPING` check passes without pretending that
+the full workspace category mapping is complete. Full-scope category mapping
+remains unqualified.
+
+The two existing DEV categories read through the category form API are:
+
+```text
+R&D_CI_Document_Information: category 33268
+  33268_2 Status: DRAFT, SUBMITTED, REVIEWED, RELEASED, OBSOLETE
+  33268_3 Process File Owner: GX39 user picker
+  33268_5 ASIL relevant: boolean
+
+R&D_CI_Info_Sec_Classification: category 33270
+  33270_2 Information Classification:
+    PUBLIC, INTERNAL, CONFIDENTIAL, STRICTLY CONFIDENTIAL
+```
+
+`GET /api/v2/nodes/38920/categories` is empty because the template node has no
+direct category values; it does not enumerate the template type schema. The
+source's non-empty `Related DataID` values resolve to on-prem `KUAF` users,
+not documents. They are intentionally excluded from this Core Pilot because
+the corresponding users do not exist in GX39 DEV.
+
+The local configuration also currently has:
+
+```text
+active_workflows_confirmed_zero=true
+personal_state_out_of_scope_approved=true
+historical_audit_out_of_scope_approved=false
+```
+
+The audit-history flag remains false because real in-scope audit rows exist;
+Core Pilot defers that scope decision rather than silently changing it.
+
+### Core Pilot preflight result
+
+The exact online preflight used `for_mode="core_pilot"`,
+`max_documents=15`, and `core_pilot=True`. It returned
+`PASS_WITH_WARNINGS`, zero failures, and one expected ACL-inheritance
+warning. The exact selected scope was:
+
+```text
+45 nodes
+18 versions
+15,687,834 bytes total
+maximum version 4,370,132 bytes
+0 multipart versions
+0 shortcuts
+0 version comments
+0 non-empty category values
+```
+
+Source PostgreSQL was connected read-only, TLS verification was enabled, GX39
+DEV authentication passed, target `87457` read-back passed, the workspace
+route passed, and the scoped category/support/type checks passed.
+Owner/provenance/creator qualification checks were `DEFERRED` by design for
+this Core Pilot.
+
+Owner readiness for this exact scope returned:
+
+```text
+2 exceptions, both SYSTEM_OWNER
+source owner IDs: -2000 and 763886
+exception digest:
+3f699b16cfd31dc64bf86366ada2f7227beb1491c36586486dfcc87a9ca4556c
+fallback: active GX39 member 38919
+service account: exact and active
+```
+
+### Attempted run and current blocker
+
+The approved one-worker command was:
+
+```powershell
+"YES" | .\.venv\Scripts\python.exe cli.py --environment production run `
+  --mode core_pilot --max-documents 15 --threads 1 `
+  --owner-exception-operator zawodpwe `
+  --owner-exception-change-record "Dev-Test-Small-Pilot-R&D-Real-Data"
+```
+
+Run ID:
+
+```text
+dc87f2e7-7fa5-4030-b519-31a1f23b2d55
+```
+
+Final state:
+
+```text
+status: COMPLETED_WITH_ERRORS
+mode: core_pilot
+total_nodes: 45
+FAILED_TERMINAL: 45
+remote_committed_nodes: 0
+transferred_bytes: 0
+```
+
+The first container (`source_id=763886`) failed before document transfer.
+GX39 returned HTTP 500 from `POST /api/v2/businessworkspaces/` with:
+
+```text
+The role 'categories' of the parameter 'roles' cannot be parsed.
+```
+
+The client currently uses the same `_with_migration_category()` helper for
+ordinary containers and Business Workspaces. That helper injects:
+
+```python
+body["roles"] = {"categories": {migration_attribute_key: migration_id}}
+```
+
+This is accepted/qualified for the ordinary document route, but GX39 DEV
+rejects it on `/api/v2/businessworkspaces/`. The affected code is in
+`engine/client.py`, `create_container()` and `_with_migration_category()`.
+The failure was retried until the run retry budget was exhausted. Do not
+blindly rerun or recover this run.
+
+### Resolution of the Business Workspace creation blocker (2026-09-17)
+
+1. **Root cause diagnosed and verified**:
+   - In OpenText Extended ECM (xECM), `POST /api/v2/businessworkspaces/` uses the
+     `roles` parameter to assign workspace participant roles (e.g. Coordinator,
+     Member), not metadata categories. Passing `roles: {"categories": ...}`
+     caused xECM to reject the payload with `The role 'categories' of the
+     parameter 'roles' cannot be parsed.`
+   - Furthermore, unlike ordinary nodes where category attributes can be
+     injected at creation time, a freshly created Business Workspace does not yet
+     have the migration marker category attached unless the template explicitly
+     includes it. Attempting a direct `PUT /categories/{cat_id}` on a node
+     without that category attached returns `Category ID '{cat_id}' is not a valid category.`
+
+2. **Empirical qualification against GX39 Cloud**:
+   - Tested using isolated scratch probes against GX39 DEV:
+     - `POST /api/v2/businessworkspaces/` with clean parameters (`name`,
+       `description`, `parent_id`, `template_id`, `wksp_type_id`) succeeds with
+       HTTP 200, creating an authentic Business Workspace object (subtype 848).
+     - `POST /api/v2/nodes/{target_id}/categories` attaches the duplicate
+       marker category with HTTP 200.
+     - `_migration_id_matches()` confirms exact read-back of the marker.
+     - A subsequent update via `PUT` succeeds with HTTP 200, while a duplicate
+       `POST` returns an "already exists" error that is cleanly handled by fallback.
+
+3. **Code changes implemented and validated**:
+   - In `engine/client.py`:
+     - `create_container()` now sends a clean dictionary to
+       `/api/v2/businessworkspaces/` without the `roles` field, extracts the
+       resulting `target_id`, and immediately applies the marker via
+       `apply_migration_marker()`.
+     - `apply_migration_marker()` now attempts `POST /api/v2/nodes/{target_id}/categories`
+       first to attach the category, and falls back to `PUT` if it is already
+       attached, ensuring idempotency across all object types.
+   - In `tests/test_engine_v2.py`:
+     - Updated `test_container_routes_cover_ordinary_folder_and_business_workspace`
+       to verify clean POST for Business Workspace and subsequent marker attachment.
+   - Validation:
+     - 111 unittest tests: PASS
+     - ruff check .: PASS
+     - mypy app.py engine tests: PASS
+     - Scoped online preflight for `core_pilot`: PASS_WITH_WARNINGS (0 failures,
+       1 expected ACL warning).
+
+4. **Core Pilot execution and resolved findings**:
+   During initial execution of the Core Pilot (`core_pilot`, 15 documents, 45 nodes), four specific findings were identified and resolved:
+   - **Service Account ID alignment**: OpenText Cloud creates nodes under the authenticated technical account `PZMIG_TEST_TECH_ACC` (Member ID `84116`). `service_account_member_id` and `service_account_login` in `config.json` were corrected from Fabian Haber's ID (`38919`, which remains `owner_fallback`) to `84116`/`PZMIG_TEST_TECH_ACC`.
+   - **Provenance Category HTTP 500 handling**: When a node already has the provenance category attached, OpenText returns HTTP 500 with `"The attribute group 'CDM Migration Provenance' already exists."`. In `engine/client.py`, `apply_provenance` now catches both `TerminalMigrationError` and `RetryableMigrationError` when `"already exists"` is present, falling back to `PUT`.
+   - **Business Workspace Location Rule in container read-after-write**: Template `38920` enforces a location rule placing project workspaces in `/Projects` (NodeID `34803`). `_process_container` in `engine/pipeline.py` now recognizes `route.get("location_id")` as `expected_parent`, avoiding false parent-mismatch errors.
+   - **Scoped recovery preflight**: `recover_run` in `engine/pipeline.py` now determines the exact scope (document count and `core_pilot` flag) when running preflight, avoiding full-manifest qualification errors when recovering a pilot run.
+
+5. **Core Pilot execution and live verification results**:
+   - **Run ID**: `a2736075-d127-4b66-b881-04e8ea3febbd`
+   - **Environment**: `production` (targeting GX39 DEV/TEST with real corporate source data)
+   - **Scope**: Core Pilot (15 documents, 45 nodes total including hierarchy)
+   - **Execution Status**: `COMPLETED`
+   - **Verified Nodes**: 45 / 45 (100% success rate, 0 failed nodes)
+   - **Binary Data Transferred**: 15,687,834 bytes (~15.7 MB)
+   - **Automated Live Verification (`cli.py verify --live`)**:
+     - `TEST_01_TARGET_INVENTORY`: PASS (45 run items verified and readable on target)
+     - `TEST_02_VERSION_SHA256`: PASS (18 version transfer records with verified SHA-256 hashes)
+     - `TEST_03_CATEGORY_VALUES`: PASS (target category value parity)
+     - `TEST_04_VERSION_CHAIN`: PASS (15 document version chains complete and intact)
+     - `TEST_05_OWNER_PROVENANCE`: PASS (owner, creator, and migration provenance verified across all 45 target nodes)
+     - `TEST_06_PERMISSION_READBACK`: PASS (target ACLs visible and readable for 45 nodes)
+     - **Overall Status**: `PASS` (6 of 6 tests passed in 72.58s)
+
+6. **Creator-based owner remapping for Business Workspace items**:
+   - In OpenText Extended ECM, `OwnerID` for all objects inside a Business Workspace is assigned to the workspace container DataID (`763886`) or a system code (`-2000`).
+   - Implemented extraction of `CreatedBy` from `cs.DTree` in `engine/db.py`.
+   - When an object inside a Business Workspace carries a system/workspace `OwnerID`, `extract_all` remaps the effective source owner to its actual creator (`CreatedBy`).
+   - This ensures full author identity (login, email, display name) is preserved in `CDM Migration Provenance` (e.g. Ricardo Krause, `uib13313@vitesco.com` on node `802355`), and active Schaeffler engineers (>82% of workspace objects) are resolved directly as owners in GX39 Cloud.
+   - Tested and verified: 114/114 unittests pass, clean ruff and mypy.

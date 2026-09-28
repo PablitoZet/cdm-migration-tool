@@ -283,7 +283,13 @@ Current rules:
   approved policy; do not invent targets.
 - Historical audit events and personal UI state (favorites, recents,
   subscriptions, preferences) are not migrated by this tool and require explicit
-  acceptance.
+  acceptance. An optional, operator-triggered `cli.py export-audit-history`
+  command can render the in-scope source audit trail as a plain CSV and,
+  with `--upload-to`, upload it as a supplementary reference document into an
+  already-migrated container. This is not, and must never become, a way to
+  write historical events into GX39's own audit trail: audit trails are
+  system-generated records of real actions, and OpenText exposes no supported
+  API to backdate them. See `engine/audit_export.py`.
 - Legacy links require separate qualified routing based on the durable source to
   target ID mapping.
 
@@ -321,16 +327,14 @@ style UI. Follow these rules:
 - `engine/preflight.py` — fail-closed readiness checks.
 - `engine/reconciler.py` — verification and read-back.
 - `engine/instance_lock.py` — single-controller lock.
+- `engine/audit_export.py` — optional, read-only CSV rendering of the source
+  audit trail for a migration scope; supplementary reference only, never
+  written into GX39's own audit trail (see section 10).
 - `cli.py` — headless corporate-machine operations.
 - `preflight.py` — lightweight preflight entry point.
 - `tests/` — engine and UI contracts.
 - `package_release.py` — secret-free checksummed transfer bundle.
 - `.github/workflows/quality.yml` — mandatory GitHub quality and release check.
-- `BUSINESS_WORKSPACE_TASK_BRIEF.md` — self-contained implementation brief for
-  the open Business Workspace source-traversal gap, written for an agent
-  without corporate/GX39 access. Delete this file once that task is
-  implemented, qualified, and folded into `ARCHITECTURE.md` and
-  `CORPORATE_HANDOFF.md`.
 
 ## 13. Required change procedure for every agent
 

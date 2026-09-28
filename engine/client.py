@@ -550,7 +550,9 @@ class OpenTextCloudClient:
             "version_update_qualified": version_update_qualified,
         }
 
-    def find_by_migration_id(self, parent_id: int, migration_id: str) -> int | None:
+    def find_by_migration_id(
+        self, parent_id: int, migration_id: str, *, expected_name: str | None = None,
+    ) -> int | None:
         if not self.migration_category_id or not self.migration_attribute_key:
             return None
         # Category-backed search is tenant/index dependent. Use a narrow paged
@@ -564,6 +566,8 @@ class OpenTextCloudClient:
             payload = response.json()
             for item in payload.get("results", []):
                 props = item.get("data", {}).get("properties", {})
+                if expected_name is not None and props.get("name") != expected_name:
+                    continue
                 target_id = props.get("id")
                 if target_id and self._migration_id_matches(int(target_id), migration_id):
                     return int(target_id)
@@ -573,14 +577,29 @@ class OpenTextCloudClient:
             page += 1
 
     def _migration_id_matches(self, target_id: int, migration_id: str) -> bool:
-        response = self._request(
-            "GET", f"/api/v2/nodes/{target_id}/categories/{self.migration_category_id}"
-        )
+        try:
+            response = self._request(
+                "GET", f"/api/v2/nodes/{target_id}/categories/{self.migration_category_id}"
+            )
+        except (TerminalMigrationError, RetryableMigrationError) as exc:
+            err_msg = str(exc).lower()
+            if (
+                "not a category" in err_msg
+                or "not a valid category" in err_msg
+                or "insufficient permissions" in err_msg
+                or "permission" in err_msg
+                or "access denied" in err_msg
+                or "404" in err_msg
+                or "403" in err_msg
+                or "400" in err_msg
+            ):
+                return False
+            raise
         value = _find_json_key(response.json(), str(self.migration_attribute_key))
         return str(value or "") == migration_id
 
     def create_container(self, node: SourceNode, parent_id: int, migration_id: str) -> int:
-        existing = self.find_by_migration_id(parent_id, migration_id)
+        existing = self.find_by_migration_id(parent_id, migration_id, expected_name=node.name)
         if existing:
             return existing
         if node.subtype == 848:
@@ -589,17 +608,28 @@ class OpenTextCloudClient:
                 raise TerminalMigrationError(
                     f"Business Workspace {node.source_id} requires an explicit workspace_routes mapping"
                 )
-            body = self._with_migration_category({
+            loc_id = route.get("location_id") or route.get("parent_id")
+            if loc_id and int(loc_id) != parent_id:
+                existing = self.find_by_migration_id(int(loc_id), migration_id, expected_name=node.name)
+                if existing:
+                    return existing
+            body: dict[str, Any] = {
                 "name": node.name,
                 "description": node.description,
                 "parent_id": parent_id,
-                "wksp_type_id": route["workspace_type_id"],
                 "template_id": route["template_id"],
-            }, migration_id)
+            }
+            if route.get("workspace_type_id"):
+                body["wksp_type_id"] = route["workspace_type_id"]
             response = self._request(
                 "POST", "/api/v2/businessworkspaces/", retry_safe=False,
                 expected=(200, 201), data={"body": json.dumps(body)},
             )
+            target_id = _extract_target_id(response.json())
+            if not target_id:
+                raise RetryableMigrationError("Business Workspace create response did not contain a target node ID")
+            self.apply_migration_marker(target_id, migration_id)
+            return target_id
         else:
             if node.subtype not in (0, 202, 298):
                 raise TerminalMigrationError(f"Unsupported container subtype {node.subtype}")
@@ -608,10 +638,10 @@ class OpenTextCloudClient:
                 "POST", "/api/v2/nodes", retry_safe=False, expected=(200, 201),
                 data={"body": json.dumps(self._with_migration_category(body, migration_id))},
             )
-        target_id = _extract_target_id(response.json())
-        if not target_id:
-            raise RetryableMigrationError("Create response did not contain a target node ID")
-        return target_id
+            target_id = _extract_target_id(response.json())
+            if not target_id:
+                raise RetryableMigrationError("Create response did not contain a target node ID")
+            return target_id
 
     def upload_first_version(
         self, node: SourceNode, version: SourceVersion, parent_id: int,
@@ -704,7 +734,7 @@ class OpenTextCloudClient:
         self, node: SourceNode, parent_id: int, migration_id: str,
         *, referenced_target_id: int | None = None,
     ) -> int:
-        existing = self.find_by_migration_id(parent_id, migration_id)
+        existing = self.find_by_migration_id(parent_id, migration_id, expected_name=node.name)
         if existing:
             return existing
         if node.subtype == 1:
@@ -800,8 +830,8 @@ class OpenTextCloudClient:
                 data={"body": json.dumps(add_payload)},
             )
             return
-        except TerminalMigrationError as exc:
-            if "already exists" not in str(exc):
+        except (TerminalMigrationError, RetryableMigrationError) as exc:
+            if "already exists" not in str(exc).lower():
                 raise
         endpoint = self.provenance_endpoint.format(
             target_id=int(target_id), category_id=int(category_id),
@@ -881,12 +911,52 @@ class OpenTextCloudClient:
         if not self.migration_category_id or not self.migration_attribute_key:
             raise TerminalMigrationError("Migration marker category is required for idempotent uploads")
         body = {"category_id": self.migration_category_id, str(self.migration_attribute_key): migration_id}
-        self._request(
-            "PUT", f"/api/v2/nodes/{target_id}/categories/{self.migration_category_id}",
-            expected=(200, 201, 204), data={"body": json.dumps(body)},
-        )
+        add_endpoint = f"/api/v2/nodes/{int(target_id)}/categories"
+        try:
+            self._request(
+                "POST", add_endpoint, expected=(200, 201, 204),
+                data={"body": json.dumps(body)},
+            )
+        except (TerminalMigrationError, RetryableMigrationError) as exc:
+            # If the category is already attached to this node (e.g. from template or previous attempt),
+            # OpenText returns "already exists" or HTTP 500/400. In that case, update it via PUT.
+            if "already exists" in str(exc) or "400" in str(exc) or "500" in str(exc):
+                self._request(
+                    "PUT", f"/api/v2/nodes/{target_id}/categories/{self.migration_category_id}",
+                    expected=(200, 201, 204), data={"body": json.dumps(body)},
+                )
+            else:
+                raise
         if not self._migration_id_matches(target_id, migration_id):
             raise TerminalMigrationError("Migration marker read-back did not match after update")
+
+    def upload_supplementary_document(
+        self, parent_id: int, name: str, description: str,
+        content: bytes, mime_type: str, migration_id: str,
+    ) -> int:
+        """Upload a standalone supplementary document that is not part of the migrated
+        node scope itself (for example, a historical-audit-history export). This is an
+        operator-triggered, optional side artifact, not a migrated source object, but it
+        reuses the same duplicate-protection marker mechanism (see AGENTS.md section 6)
+        so re-running the export does not create a duplicate copy in the target."""
+        existing = self.find_by_migration_id(parent_id, migration_id, expected_name=name)
+        if existing:
+            return existing
+        node_body = self._with_migration_category(
+            {"type": 144, "parent_id": parent_id, "name": name, "description": description},
+            migration_id,
+        )
+        fields: dict[str, str | int] = {"body": json.dumps(node_body)}
+        stream = io.BytesIO(content)
+        body = MultipartStream(fields, "file", name, mime_type, stream, len(content))
+        response = self._request(
+            "POST", "/api/v2/nodes", retry_safe=False, expected=(200, 201), data=body,
+            headers={"Content-Type": body.content_type, "Content-Length": str(len(body))},
+        )
+        target_id = _extract_target_id(response.json())
+        if not target_id:
+            raise RetryableMigrationError("Upload response did not contain a target node ID")
+        return target_id
 
     def iter_content(self, target_id: int, version_num: int | None = None):
         endpoint = (

@@ -26,7 +26,12 @@ The tool fails closed when required equivalence cannot be proven. It does not
 silently flatten unsupported types or accept a partial verification result.
 
 Historical audit events and personal UI state are outside this workspace tool.
-Their exclusion requires an explicit Acceptance decision.
+Their exclusion requires an explicit Acceptance decision. An optional,
+read-only supplementary export (`engine/audit_export.py`, `cli.py
+export-audit-history`) can render the in-scope source audit trail as a CSV
+document and upload it as a plain reference document into the migrated
+workspace; it is not a migration of audit data into GX39's own audit trail,
+which remains architecturally out of scope.
 
 ## Components
 
@@ -125,6 +130,28 @@ production Full Cutover, the
 operator confirms that the source is read-only and the application re-reads the
 scope. A different signature rejects the cutover.
 
+### Business Workspace (SubType 848) traversal and target creation
+
+In OpenText Content Server on-premise, a Business Workspace object (`SubType 848`)
+does not directly store child documents and folders under its positive `DataID`.
+Instead, Content Server creates an internal "shadow container" with negative
+`DataID = -workspace_data_id` (`SubType 849`). The actual business hierarchy is
+rooted under this shadow container.
+
+`engine/db.py` handles this seamlessly:
+- Detects whether the source root (or any descendant) is a Business Workspace (`SubType 848`).
+- Pairs each Business Workspace with its shadow node (`-DataID`, `SubType 849`) in `DTree`.
+- Recursively extracts the complete subtree under the shadow container.
+- Remaps direct children of the shadow container so their `parent_source_id` is the real workspace's positive `DataID`.
+- Completely excludes the internal shadow container from the manifest, target creation, and verification.
+
+Target Business Workspace creation in GX39 SaaS:
+- `engine/client.py` uses `POST /api/v2/businessworkspaces/` with clean JSON (`{"name", "description", "parent_id", "template_id", "wksp_type_id"}`).
+- The target template may enforce a Location Rule (e.g. placing project workspaces in `/Projects`).
+  The profile's `workspace_routes` specifies `location_id` for the target parent.
+- Both `engine/client.py` and `engine/pipeline.py` respect `location_id` for idempotent lookup (`find_by_migration_id`) and parent read-after-write verification.
+- The `CDM Migration ID` duplicate protection marker and `CDM Migration Provenance` categories are applied idempotently to the target workspace via `POST` with fallback to `PUT`.
+
 ## Run and item state
 
 Each execution has a UUID `run_id` and an independent set of run items.
@@ -176,8 +203,13 @@ HTTP 500 "Insufficient permissions". Running owner reassignment last, across
 the whole run, guarantees no container loses the migration account's ACL
 entry before all of its descendants exist.
 
-Business Workspace subtype 848 uses the target Business Workspace API and
-requires a configured target type/template route. On the source side,
+Business Workspace subtype 848 uses the target Business Workspace API (`POST /api/v2/businessworkspaces/`)
+with clean creation parameters (`name`, `description`, `parent_id`, `template_id`, and optional `wksp_type_id`).
+In OpenText Extended ECM, the `roles` parameter maps workspace participant roles rather than metadata categories,
+so category injection during POST is rejected. The duplicate-protection marker (`CDM Migration ID`) is applied
+immediately after creation via `POST /api/v2/nodes/{target_id}/categories` (with transparent fallback to `PUT`
+if already attached) and verified by read-back before creating descendants. It requires a configured target
+type/template route. On the source side,
 `engine/db.py` also follows each workspace W to its source-only shadow container
 at DataID -W, including workspaces encountered below ordinary folders or other
 workspaces. The shadow shares the workspace's logical depth/path while both IDs
